@@ -283,7 +283,7 @@ def build_loss_function(loss_function_config):
 
 def train(config, seed, data_loaders, num_epochs):
     # Retrieve hyperparameters from the config
-    model_output_path = config['model_output_path']
+    model_output_dir = config['model_output_dir']
     image_logging_interval = config['image_logging_interval']
     model_config = config['model']
     model_id = model_config['id']
@@ -295,12 +295,6 @@ def train(config, seed, data_loaders, num_epochs):
     train_loader = data_loaders['train']
     validation_loader = data_loaders['validation']
 
-    # Ensure model file path directory exists
-    if model_output_path:
-        model_file_dir = os.path.dirname(model_output_path)
-        if not os.path.exists(model_file_dir):
-            os.makedirs(model_file_dir)
-    
     # Set the random seed for training reproducibility
     set_seed(seed)
     
@@ -313,8 +307,12 @@ def train(config, seed, data_loaders, num_epochs):
     # Initialize W&B
     date_s = time.strftime('%Y%m%dT%H%M%S')
     run_id = f"{date_s}-{model_id}"
-    wandb.init(project=PROJECT_NAME, id=run_id, config=config) # Start a new W&B run
+    run = wandb.init(project=PROJECT_NAME, id=run_id, config=config) # Start a new W&B run
     wandb.watch(model) # Log the model architecture
+
+    # Ensure model file path directory exists
+    os.makedirs(model_output_dir, exist_ok=True)
+    model_output_path = f"{model_output_dir}/best_model_{run.id}.pth"
 
     # Train for X epochs
     best_validation_accuracy = 0.0
@@ -362,7 +360,7 @@ def train(config, seed, data_loaders, num_epochs):
         train_accuracy = 100 * correct / total
 
         # Evaluate the model on the test set
-        validation_accuracy, validation_loss, validation_labels, validation_predictions, misclassifications = evaluate(model, validation_loader)
+        validation_accuracy, validation_loss, validation_labels, validation_predictions, _ = evaluate(model, validation_loader)
 
         # Log metrics to console
         metrics = {
@@ -376,10 +374,9 @@ def train(config, seed, data_loaders, num_epochs):
         }
         logging.info(json.dumps(metrics, indent=4))
 
-        # Log metrics to W&B
+        # Log metrics to W&B (add confusion matrix every X epochs)
         wandb_metrics = {**metrics}
         if epoch % image_logging_interval == 0: 
-            # Add confusion matrix plot
             cm = confusion_matrix(validation_labels, validation_predictions)
             plt.figure(figsize=(10, 10))
             sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', xticklabels=np.arange(10), yticklabels=np.arange(10))
@@ -388,16 +385,24 @@ def train(config, seed, data_loaders, num_epochs):
             confusion_matrix_image = wandb.Image(plt)
             wandb_metrics["confusion_matrix"] = confusion_matrix_image
             plt.close()
-
-            # Add misclassified images
-            wandb_metrics["misclassified_images"] = [wandb.Image(img, caption=f"True: {true}, Pred: {pred}") for img, true, pred in misclassifications]
         wandb.log(wandb_metrics)
 
-        # If the model is the best so far, save it
+        # If the model is the best so far, save it to disk
         if validation_accuracy > best_validation_accuracy:
             best_validation_accuracy = validation_accuracy
             torch.save(model, model_output_path)
             logging.info(f'Saved best model with accuracy: {best_validation_accuracy:.2f}%')
+
+    # Upload best model to W&B
+    logging.info(f"Uploading model to W&B: {model_output_path}")
+    wandb.save(model_output_path)
+    artifact_name = model_output_path.split("/")[-1]
+    artifact = wandb.Artifact(artifact_name, type='model')
+    artifact.add_file(model_output_path)
+    run.log_artifact(artifact)
+
+    # Mark the run as finished
+    run.finish()
 
     # Return the best validation accuracy
     return best_validation_accuracy
@@ -406,12 +411,31 @@ def train(config, seed, data_loaders, num_epochs):
 def evaluate(model, test_loader):
     # Load the model if it's a path
     if isinstance(model, str):
-        model = torch.load(model).to(DEVICE)
-    
+        model_path = model
+        if model_path.startswith('https://wandb.ai/'):
+            wandb.init(project=PROJECT_NAME)
+            try:
+                url_tokens = model_path.split('/')
+                entity_id = url_tokens[3]
+                project_name = url_tokens[4]
+                run_id = url_tokens[6]
+                model_file_name = f"best_model_{run_id}.pth"
+                artifact_path = f"{entity_id}/{project_name}/{model_file_name}:latest"
+                logging.info(f"Downloading model artifact: {artifact_path}")
+                artifact = wandb.use_artifact(artifact_path, type='model')
+                artifact_dir = artifact.download()
+                model_path = f"{artifact_dir}/{model_file_name}"
+                model = torch.load(model_path).to(DEVICE)
+            finally:
+                wandb.finish()
+        else:
+            model = torch.load(model_path).to(DEVICE)
+        
     # Set the model in evaluation mode
     model.eval()
 
     # Define the loss function
+    # TODO: use data from w&b
     criterion = nn.CrossEntropyLoss()
 
     correct = total = running_loss = 0
@@ -528,7 +552,7 @@ def _main():
 
     # Define the configuration
     config = {
-        "model_output_path": args.model_path, # Path to save the best model
+        "model_output_dir": "outputs", # Path to save the best model to
         'data_loader_batch_size': 64, # Batch size for the data loader
         'image_logging_interval': 5, # Log confusion matrix every 5 epochs
         "model" : {
@@ -576,7 +600,6 @@ def _main():
     data_loaders = {'train': train_loader, 'validation': validation_loader, 'test': test_loader}
 
     def _eval(model_path, test_loader):
-        assert os.path.exists(model_path), 'Model path does not exist.'
         accuracy, average_loss, all_labels, all_predictions, _ = evaluate(model_path, test_loader)
         cm = confusion_matrix(all_labels, all_predictions)
         logging.info(f"Test Set - Accuracy: {accuracy:.2f}%")

@@ -1,8 +1,5 @@
 # TODO
 
-- [] wandb: save model with run
-- [] wandb: make eval work with eval artifact
-
 - [] tuning: fix it (broken)
 - [] tuning: Tune loss function
 - [] tuning: Adjust pruner
