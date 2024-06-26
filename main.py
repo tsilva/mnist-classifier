@@ -1,4 +1,7 @@
 import os
+import io
+from PIL import Image
+import math
 import time
 import random
 import argparse
@@ -13,16 +16,18 @@ import torchvision.transforms as transforms
 from torch.utils.data import DataLoader, random_split
 import numpy as np
 import optuna
+import optuna.visualization as optuna_viz
 import wandb
 import atexit
 from sklearn.metrics import confusion_matrix
 import seaborn as sns
 import matplotlib.pyplot as plt
 import torch.nn.functional as F
+from optuna.integration.wandb import WeightsAndBiasesCallback
 
 
 PROJECT_NAME = 'mnist-classifier'
-OPTUNA_STORAGE_URI = "mysql://root@localhost/optuna"
+OPTUNA_STORAGE_URI = "mysql://root@localhost/example?unix_socket=/var/run/mysqld/mysqld.sock"
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # Setup logger
@@ -281,7 +286,7 @@ def build_loss_function(loss_function_config):
     }[loss_function_id](**loss_function_params)
     return loss_function
 
-def train(config, seed, data_loaders, num_epochs):
+def train(config, seed, data_loaders, num_epochs, trial=None, trial_prune_interval=None):
     # Retrieve hyperparameters from the config
     model_output_dir = config['model_output_dir']
     image_logging_interval = config['image_logging_interval']
@@ -306,7 +311,8 @@ def train(config, seed, data_loaders, num_epochs):
 
     # Initialize W&B
     date_s = time.strftime('%Y%m%dT%H%M%S')
-    run_id = f"{date_s}-{model_id}"
+    run_type = 'trial' if trial else 'train'
+    run_id = f"{run_type}__{date_s}__{model_id}"
     run = wandb.init(project=PROJECT_NAME, id=run_id, config=config) # Start a new W&B run
     wandb.watch(model) # Log the model architecture
 
@@ -374,7 +380,7 @@ def train(config, seed, data_loaders, num_epochs):
         }
         logging.info(json.dumps(metrics, indent=4))
 
-        # Log metrics to W&B (add confusion matrix every X epochs)
+        # Create W&B metrics (add images every X epochs)
         wandb_metrics = {**metrics}
         if epoch % image_logging_interval == 0: 
             cm = confusion_matrix(validation_labels, validation_predictions)
@@ -385,7 +391,9 @@ def train(config, seed, data_loaders, num_epochs):
             confusion_matrix_image = wandb.Image(plt)
             wandb_metrics["confusion_matrix"] = confusion_matrix_image
             plt.close()
-        wandb.log(wandb_metrics)
+
+        # Log metrics to W&B
+        wandb.log(wandb_metrics, step=epoch)
 
         # If the model is the best so far, save it to disk
         if validation_accuracy > best_validation_accuracy:
@@ -393,6 +401,12 @@ def train(config, seed, data_loaders, num_epochs):
             torch.save(model, model_output_path)
             logging.info(f'Saved best model with accuracy: {best_validation_accuracy:.2f}%')
 
+        # Prune trials if requested
+        if trial and trial_prune_interval and (epoch + 1) % trial_prune_interval == 0:
+            trial.report(validation_accuracy, epoch)
+            if trial.should_prune():
+                raise optuna.TrialPruned()
+            
     # Upload best model to W&B
     logging.info(f"Uploading model to W&B: {model_output_path}")
     wandb.save(model_output_path)
@@ -484,40 +498,88 @@ def evaluate(model, test_loader):
     return accuracy, average_loss, all_labels, all_predictions, misclassifications
 
 
-def tune(config, study_name, seeds, n_trials, trial_prune_interval=None):
-    # Define the objective function for the Optuna study
-    _config = config
-    def _objective(trial):
-        config = {
-            **_config,
-            "learning_rate" : trial.suggest_loguniform('lr', 1e-5, 1e-1),
-            "conv1_filters" : trial.suggest_int('conv1_filters', 16, 64),
-            "conv2_filters" : trial.suggest_int('conv2_filters', 32, 128),
-            "fc1_neurons" : trial.suggest_int('fc1_neurons', 500, 2000),
-            "fc2_neurons" : trial.suggest_int('fc2_neurons', 10, 100)
-        }
-
-        # Train with multiple seeds to average out the randomness
-        accuracies = []
-        for seed in seeds:
-            accuracy = train(config, seed, trial=trial, trial_prune_interval=trial_prune_interval)
-            accuracies.append(accuracy)
-        return np.mean(accuracies)
-    
-    # Run the optuna study
-    study_name = f"study={study_name}"
+def tune(config, seeds, data_loaders, n_epochs, n_trials, trial_prune_interval):
+    # Create the optuna study
     seed = seeds[0]
     sampler = optuna.samplers.TPESampler(seed=seed)
     pruner = optuna.pruners.HyperbandPruner()
     study = optuna.create_study(
         direction="maximize",
-        study_name=study_name,
+        study_name=PROJECT_NAME,
         storage=OPTUNA_STORAGE_URI,
         sampler=sampler,
         pruner=pruner,
         load_if_exists=True
     )
-    study.optimize(_objective, n_trials=n_trials)
+
+    wandb_kwargs = {"project": PROJECT_NAME}
+    wandbc = WeightsAndBiasesCallback(wandb_kwargs=wandb_kwargs, as_multirun=True)
+
+    _config = config
+
+    # Define the objective function for the Optuna study
+    @wandbc.track_in_wandb()
+    def _objective(trial):
+        # Define the search space for each model type
+        model_id = trial.suggest_categorical('model_id', ["CNN", "LeNet5"])
+        model_params = {}
+        if model_id == "CNN":
+            conv1_filters = trial.suggest_int('conv1_filters', 16, 64)
+            conv2_filters = trial.suggest_int('conv2_filters', 32, 128)
+            fc1_neurons = trial.suggest_int('fc1_neurons', 500, 2000)
+            fc2_neurons = trial.suggest_int('fc2_neurons', 10, 100)
+            model_params = {
+                "conv1_filters": conv1_filters,
+                "conv2_filters": conv2_filters,
+                "fc1_neurons": fc1_neurons,
+                "fc2_neurons": fc2_neurons
+            }
+
+        # Define optimizer search space
+        optimizer_id = trial.suggest_categorical('optimizer_id', ["Adam", "SGD"])
+        optimizer_params = {}
+        if optimizer_id == "Adam":
+            lr = trial.suggest_loguniform('adam_lr', 1e-5, 1e-1)
+            optimizer_params = {"lr": lr}
+        elif optimizer_id == "SGD":
+            lr = trial.suggest_loguniform('sgd_lr', 1e-5, 1e-1)
+            momentum = trial.suggest_uniform('momentum', 0.0, 0.9)
+            optimizer_params = {"lr": lr, "momentum": momentum}
+
+        # Define learning rate scheduler search space
+        scheduler_id = trial.suggest_categorical('scheduler_id', ["StepLR"])
+        scheduler_params = {}
+        if scheduler_id == "StepLR":
+            step_size = trial.suggest_int('step_size', 1, 10)
+            gamma = trial.suggest_uniform('gamma', 0.1, 0.9)
+            scheduler_params = {"step_size": step_size, "gamma": gamma}
+
+        # Assemble the trial configuration
+        config = {
+            **_config,
+            "model": {
+                "id": model_id,
+                "params": model_params
+            },
+            "optimizer": {
+                "id": optimizer_id,
+                "params": optimizer_params
+            },
+            "learning_rate_scheduler": {
+                "id": scheduler_id,
+                "params": scheduler_params
+            }
+        }
+
+        # Train with multiple seeds to average out the randomness
+        accuracies = []
+        for seed in seeds:
+            accuracy = train(config, seed, data_loaders, n_epochs, trial=trial, trial_prune_interval=trial_prune_interval)
+            accuracies.append(accuracy)
+        return np.mean(accuracies)
+    
+    # Run the optuna study
+    study.optimize(_objective, n_trials=n_trials, callbacks=[wandbc])
 
     # Return the study result
     study_results = {
@@ -609,15 +671,15 @@ def _main():
     # Train the model
     if args.mode == 'train':
         seed = args.seeds[0]
-        train(config, seed, data_loaders, num_epochs=args.n_epochs)
+        train(config, seed, data_loaders, args.n_epochs)
         _eval(args.model_path, test_loader)
     # Evaluate a model
     elif args.mode == 'eval':
         _eval(args.model_path, test_loader)
     # Perform hyperparameter tuning
     elif args.mode == 'tune':
-        n_epochs = int(args.n_timesteps * args.trial_epoch_ratio)
-        tune(config, args.study_name, args.seeds, args.n_trials, n_epochs, algo=args.algo, trial_prune_interval=args.trial_prune_interval)
+        n_epochs = int(math.ceil(args.n_epochs * args.trial_epoch_ratio))
+        tune(config, args.seeds, data_loaders, n_epochs, args.n_trials, trial_prune_interval=args.trial_prune_interval)
 
 def main():
     try: _main()

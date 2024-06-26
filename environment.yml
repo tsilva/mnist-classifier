@@ -6,7 +6,6 @@ channels:
   - defaults
 dependencies:
   - python=3.8
-  - pip
   - numpy
   - matplotlib
   - pytorch
@@ -14,6 +13,10 @@ dependencies:
   - cuda-toolkit=11.8
   - scikit-learn
   - seaborn
-  - pip:
-    - optuna
-    - wandb
+  - optuna
+  - optuna-dashboard
+  - optuna-integration
+  - plotly
+  - mysqlclient
+  - wandb
+  - pip
