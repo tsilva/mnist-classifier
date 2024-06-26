@@ -8,7 +8,7 @@ import torch.nn as nn
 import torch.optim as optim
 import torchvision
 import torchvision.transforms as transforms
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, random_split
 import numpy as np
 import optuna
 import wandb
@@ -26,6 +26,11 @@ logger = logging.getLogger(__name__)
 
 # Indicate the device being used
 logger.info(f"Using device: {DEVICE}")
+
+def set_seed(seed):
+    random.seed(seed)  
+    np.random.seed(seed)
+    torch.manual_seed(seed)
 
 class CNN(nn.Module):
     def __init__(self, conv1_filters=32, conv2_filters=64, fc1_neurons=1000, fc2_neurons=10):
@@ -78,17 +83,16 @@ def train(config, seed, data_loaders, num_epochs=100):
 
     # Unpack data loaders
     train_loader = data_loaders['train']
-    test_loader = data_loaders['test']
-    
+    validation_loader = data_loaders['validation']
+
     # Ensure model file path directory exists
     if model_output_path:
         model_file_dir = os.path.dirname(model_output_path)
         if not os.path.exists(model_file_dir):
             os.makedirs(model_file_dir)
-
-    # Set the random seed for reproducibility
-    np.random.seed(seed)
-    random.seed(seed)
+    
+    # Set the random seed for training reproducibility
+    set_seed(seed)
     
     # Create the model and move it to the device (eg: GPU)
     model = CNN(
@@ -99,6 +103,7 @@ def train(config, seed, data_loaders, num_epochs=100):
     ).to(DEVICE)
 
     # Log model architecture
+    wandb.init(project=PROJECT_NAME)
     wandb.watch(model)
 
     # Initialize the optimizer and learning rate scheduler
@@ -111,7 +116,7 @@ def train(config, seed, data_loaders, num_epochs=100):
     criterion = nn.CrossEntropyLoss()
 
     # Train for X epochs
-    best_accuracy = 0.0
+    best_validation_accuracy = 0.0
     for epoch in range(num_epochs):
         # Set the model in training mode
         model.train()
@@ -153,26 +158,30 @@ def train(config, seed, data_loaders, num_epochs=100):
         train_loss = running_loss / len(train_loader.dataset)
         train_accuracy = 100 * correct / total
 
-        validation_accuracy, validation_loss, val_labels, val_preds = evaluate(model, test_loader)
-        
-        # Log metrics to W&B
+        # Evaluate the model on the test set
+        validation_accuracy, validation_loss, validation_labels, validation_predictions, misclassifications = evaluate(model, validation_loader)
+
+        # Log metrics to console
         metrics = {
             "epoch": epoch + 1,
             "train_loss": train_loss,
             "train_accuracy": train_accuracy,
             "validation_loss": validation_loss,
             "validation_accuracy": validation_accuracy,
-            "best_accuracy": best_accuracy,
+            "best_accuracy": best_validation_accuracy,
             "learning_rate": scheduler.get_last_lr()[0]
         }
-        wandb.log(metrics)
-        
-        # Log metrics to console
         logging.info(json.dumps(metrics, indent=4))
+
+        # Log metrics to W&B
+        wandb.log({
+            **metrics,
+            "misclassified_images": [wandb.Image(img, caption=f"True: {true}, Pred: {pred}") for img, true, pred in misclassifications]
+        })
 
         # Log confusion matrix periodically
         if (epoch + 1) % confusion_matrix_logging_interval == 0:
-            cm = confusion_matrix(val_labels, val_preds)
+            cm = confusion_matrix(validation_labels, validation_predictions)
             plt.figure(figsize=(10, 10))
             sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', xticklabels=np.arange(10), yticklabels=np.arange(10))
             plt.xlabel('Predicted')
@@ -181,68 +190,70 @@ def train(config, seed, data_loaders, num_epochs=100):
             plt.close()
 
         # If the model is the best so far, save it
-        if validation_accuracy > best_accuracy:
-            best_accuracy = validation_accuracy
+        if validation_accuracy > best_validation_accuracy:
+            best_validation_accuracy = validation_accuracy
             torch.save(model, model_output_path)
-            logging.info(f'Saved best model with accuracy: {best_accuracy:.2f}%')
+            logging.info(f'Saved best model with accuracy: {best_validation_accuracy:.2f}%')
 
-    # Return the best accuracy
-    return best_accuracy
+    # Return the best validation accuracy
+    return best_validation_accuracy
 
 
 def evaluate(model, test_loader):
     # Load the model if it's a path
     if isinstance(model, str):
         model = torch.load(model).to(DEVICE)
-
+    
     # Set the model in evaluation mode
     model.eval()
 
-    correct = 0
-    total = 0
-    running_loss = 0.0
-    all_images = []
-    all_labels = []
-    all_preds = []
-    misclassified_images = []
-    misclassified_labels = []
-    misclassified_preds = []
-    
     # Define the loss function
     criterion = nn.CrossEntropyLoss()
 
+    correct = total = running_loss = 0
+    all_data = []
+    misclassifications = []
+
     # Evaluate the model
-    with torch.no_grad():
+    with torch.no_grad():  # Disable gradient tracking (no backpropagation needed for evaluation)
         for images, labels in test_loader:
+            # Move images and labels to the device for inference
             images, labels = images.to(DEVICE), labels.to(DEVICE)
-            outputs = model(images)
-            loss = criterion(outputs, labels)
+
+            # Perform forward pass
+            predictions = model(images)
+
+            # Compute loss
+            loss = criterion(predictions, labels)
             running_loss += loss.item() * images.size(0)
-            _, predicted = torch.max(outputs.data, 1)
+
+            # Get the index of the max log-probability (the predicted class)
+            _, predicted = torch.max(predictions, 1)
+
+            # Update total and correct counts
             total += labels.size(0)
             correct += (predicted == labels).sum().item()
 
-            # Collect images and predictions for logging
-            all_images.extend(images.cpu().numpy())
-            all_labels.extend(labels.cpu().numpy())
-            all_preds.extend(predicted.cpu().numpy())
+            # Move data back to CPU and collect results
+            cpu_images, cpu_labels, cpu_predicted = images.cpu(), labels.cpu(), predicted.cpu()
+            all_data.extend(zip(cpu_images, cpu_labels, cpu_predicted))
+            
+            # Collect misclassifications
+            misclassifications.extend([
+                (img, lbl, pred) for img, lbl, pred in zip(cpu_images, cpu_labels, cpu_predicted) 
+                if lbl != pred
+            ])
 
-            # Identify misclassified images
-            for i in range(len(labels)):
-                if labels[i] != predicted[i]:
-                    misclassified_images.append(images[i].cpu().numpy())
-                    misclassified_labels.append(labels[i].cpu().numpy())
-                    misclassified_preds.append(predicted[i].cpu().numpy())
-
+    # Calculate accuracy
     accuracy = 100 * correct / total
-    avg_loss = running_loss / len(test_loader.dataset)
 
-    # Log misclassified images, labels, and predictions to W&B
-    wandb.log({
-        "misclassified_images": [wandb.Image(img, caption=f"True: {true}, Pred: {pred}") for img, true, pred in zip(misclassified_images, misclassified_labels, misclassified_preds)]
-    })
+    # Calculate the average loss
+    average_loss = running_loss / total
 
-    return accuracy, avg_loss, all_labels, all_preds
+    # Extract all labels and predictions
+    all_labels, all_predictions = zip(*[(lbl.item(), pred.item()) for _, lbl, pred in all_data])
+
+    return accuracy, average_loss, all_labels, all_predictions, misclassifications
 
 
 def tune(config, study_name, seeds, n_trials, trial_prune_interval=None):
@@ -295,7 +306,8 @@ def main():
     # Parse command line arguments
     parser = argparse.ArgumentParser(description='Train, evaluate, or tune a CNN on MNIST dataset.')
     parser.add_argument('mode', choices=['train', 'eval', 'tune'], help='Mode to run the script in')
-    parser.add_argument('--model_path', type=str, help='Path to the model file for evaluation')
+    parser.add_argument("--validation_split", type=float, default=0.2, help="Validation split ratio")
+    parser.add_argument('--model_path', type=str, default="outputs/best_model.pth", help='Path to the model file for evaluation')
     parser.add_argument('--n_epochs', type=int, default=20, help='Number of epochs to train the model for')
     parser.add_argument("--seeds", type=int, nargs="+", default=[123], help="Random seeds to use for training")
     parser.add_argument("--n_trials", type=int, default=100, help="Number of trials for tuning")
@@ -303,9 +315,16 @@ def main():
     parser.add_argument("--trial_epoch_ratio", type=float, default=0.8, help="Ratio of epochs to run per trial in Optuna")
     args = parser.parse_args()
 
+    # Set the random seed for reproducibility (we are going to perform data 
+    # splitting and shuffling and want to do so deterministically, however 
+    # we will set the seed again in the training set because during tuning 
+    # we want to train with different seeds on the same dataset splits/shuffles)
+    seed = args.seeds[0]
+    set_seed(seed)
+
     # Define the configuration
     config = {
-        'model_output_path' : "outputs/best_model.pth", # Path to save the best model
+        "model_output_path": args.model_path, # Path to save the best model
         'data_loader_batch_size': 64, # Batch size for the data loader
         'data_loader_num_workers': 4, # Number of workers for the data loader
         'confusion_matrix_logging_interval': 5, # Log confusion matrix every 5 epochs   
@@ -316,9 +335,6 @@ def main():
         "learning_rate": 0.001 # Learning rate for the optimizer
     }
 
-    # Initialize W&B
-    wandb.init(project=PROJECT_NAME)
-
     # Define transformations
     transform = transforms.Compose([
         transforms.ToTensor(),
@@ -326,25 +342,38 @@ def main():
     ])
 
     # Load datasets
-    train_dataset = torchvision.datasets.MNIST(root='./data', train=True, download=True, transform=transform)
+    full_train_dataset = torchvision.datasets.MNIST(root='./data', train=True, download=True, transform=transform)
     test_dataset = torchvision.datasets.MNIST(root='./data', train=False, download=True, transform=transform)
 
-    # Define data loaders
+    # Split the full training dataset into training and validation sets
+    train_size = int((1 - args.validation_split) * len(full_train_dataset))
+    validation_size = len(full_train_dataset) - train_size
+    train_dataset, validation_dataset = random_split(full_train_dataset, [train_size, validation_size])
+
+    # Setup the data loaders
     batch_size = config['data_loader_batch_size']
     num_workers = config['data_loader_num_workers']
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers, pin_memory=True)
+    validation_loader = DataLoader(validation_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=True)
     test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=True)
-    data_loaders = {'train': train_loader, 'test': test_loader}
-    
+    data_loaders = {'train': train_loader, 'validation': validation_loader, 'test': test_loader}
+
+    def _eval(model_path, test_loader):
+        assert os.path.exists(model_path), 'Model path does not exist.'
+        accuracy, average_loss, all_labels, all_predictions, misclassifications = evaluate(model_path, test_loader)
+        cm = confusion_matrix(all_labels, all_predictions)
+        logging.info(f"Accuracy: {accuracy:.2f}%")
+        logging.info(f"Average Loss: {average_loss:.4f}")
+        logging.info(f"Confusion Matrix:\n{cm}")
+
     # Train the model
     if args.mode == 'train':
         seed = args.seeds[0]
         train(config, seed, data_loaders, num_epochs=args.n_epochs)
+        _eval(args.model_path, test_loader)
     # Evaluate a model
     elif args.mode == 'eval':
-        assert args.model_path is not None, 'Please provide the model path for evaluation.'
-        assert os.path.exists(args.model_path), 'Model path does not exist.'
-        evaluate(args.model_path, test_loader)
+        _eval(args.model_path, test_loader)
     # Perform hyperparameter tuning
     elif args.mode == 'tune':
         n_epochs = int(args.n_timesteps * args.trial_epoch_ratio)

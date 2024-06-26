@@ -1,6 +1,7 @@
 name: mnist-classifier
 channels:
   - pytorch
+  - nvidia
   - conda-forge
   - defaults
 dependencies:
@@ -8,9 +9,9 @@ dependencies:
   - pip
   - numpy
   - matplotlib
-  - pytorch=1.12.0  # Specify the PyTorch version
+  - pytorch
   - torchvision
-  - cudatoolkit=11.8  # Ensure the correct CUDA toolkit version is included
+  - cuda-toolkit=11.8
   - scikit-learn
   - seaborn
   - pip:
