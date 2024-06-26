@@ -1,6 +1,6 @@
 # TODO
 
-- [] tuning: fix it (broken)
+- [] tuning: Swap optuna with W&B sweeps
 - [] tuning: Tune loss function
 - [] tuning: Adjust pruner
 - [] tuning: Adjust sampler
@@ -16,3 +16,4 @@
 - [] Data augmentation: random erasing
 
 - [] Write readme file
+- [] use torchivision pretrained models

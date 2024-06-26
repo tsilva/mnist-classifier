@@ -15,20 +15,41 @@ import torchvision
 import torchvision.transforms as transforms
 from torch.utils.data import DataLoader, random_split
 import numpy as np
-import optuna
-import optuna.visualization as optuna_viz
 import wandb
 import atexit
 from sklearn.metrics import confusion_matrix
 import seaborn as sns
 import matplotlib.pyplot as plt
 import torch.nn.functional as F
-from optuna.integration.wandb import WeightsAndBiasesCallback
 
 
 PROJECT_NAME = 'mnist-classifier'
 OPTUNA_STORAGE_URI = "mysql://root@localhost/example?unix_socket=/var/run/mysqld/mysqld.sock"
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+DEFAULT_CONFIG = {
+    "model_output_dir": "outputs",
+    'data_loader_batch_size': 64,
+    'image_logging_interval': 5,
+    "model": {
+        "id": "CNN"
+    },
+    "optimizer": {
+        "id": "Adam",
+        "params": {
+            "lr": 0.001
+        }
+    },
+    "lr_scheduler": {
+        "id": "StepLR",
+        "params": {
+            "step_size": 7,
+            "gamma": 0.1
+        }
+    },
+    "loss_function": {
+        "id": "CrossEntropyLoss"
+    }
+}
 
 # Setup logger
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
@@ -270,7 +291,7 @@ def build_optimizer(model, optimizer_config):
     }[optimizer_id](model.parameters(), **optimizer_params)
     return optimizer
 
-def build_learning_rate_scheduler(optimizer, scheduler_config):
+def build_lr_scheduler(optimizer, scheduler_config):
     scheduler_id = scheduler_config['id']
     scheduler_params = scheduler_config.get('params', {})
     scheduler = {
@@ -286,14 +307,14 @@ def build_loss_function(loss_function_config):
     }[loss_function_id](**loss_function_params)
     return loss_function
 
-def train(config, seed, data_loaders, num_epochs, trial=None, trial_prune_interval=None):
+def train(config, seed, data_loaders, num_epochs, trial_run=None):
     # Retrieve hyperparameters from the config
     model_output_dir = config['model_output_dir']
     image_logging_interval = config['image_logging_interval']
     model_config = config['model']
     model_id = model_config['id']
     optimizer_config = config["optimizer"]
-    learning_rate_scheduler_config = config["learning_rate_scheduler"]
+    lr_scheduler_config = config["lr_scheduler"]
     loss_function_config = config["loss_function"]
 
     # Unpack data loaders
@@ -306,15 +327,20 @@ def train(config, seed, data_loaders, num_epochs, trial=None, trial_prune_interv
     # Build model, optimizer, learning rate scheduler, and loss function
     model = build_model(model_config)
     optimizer = build_optimizer(model, optimizer_config)
-    learning_rate_scheduler = build_learning_rate_scheduler(optimizer, learning_rate_scheduler_config)
+    lr_scheduler = build_lr_scheduler(optimizer, lr_scheduler_config)
     loss_function = build_loss_function(loss_function_config)
 
-    # Initialize W&B
-    date_s = time.strftime('%Y%m%dT%H%M%S')
-    run_type = 'trial' if trial else 'train'
-    run_id = f"{run_type}__{date_s}__{model_id}"
-    run = wandb.init(project=PROJECT_NAME, id=run_id, config=config) # Start a new W&B run
-    wandb.watch(model) # Log the model architecture
+    # TODO: softcode
+    if trial_run:
+        run = trial_run
+    else:
+        date_s = time.strftime('%Y%m%dT%H%M%S')
+        run_type = 'train' # TODO: softcode
+        run_id = f"{run_type}__{date_s}__{model_id}"
+        run = wandb.init(project=PROJECT_NAME, id=run_id, config=config) # Start a new W&B run
+
+    # Log the model architecture
+    wandb.watch(model)
 
     # Ensure model file path directory exists
     os.makedirs(model_output_dir, exist_ok=True)
@@ -359,7 +385,7 @@ def train(config, seed, data_loaders, num_epochs, trial=None, trial_prune_interv
 
         # Let the scheduler update the 
         # learning rate now that the epoch is done
-        learning_rate_scheduler.step()
+        lr_scheduler.step()
 
         # Calculate train loss and accuracy
         train_loss = running_loss / len(train_loader.dataset)
@@ -376,7 +402,7 @@ def train(config, seed, data_loaders, num_epochs, trial=None, trial_prune_interv
             "validation_loss": validation_loss,
             "validation_accuracy": validation_accuracy,
             "best_validation_accuracy": best_validation_accuracy,
-            "learning_rate": learning_rate_scheduler.get_last_lr()[0]
+            "learning_rate": lr_scheduler.get_last_lr()[0]
         }
         logging.info(json.dumps(metrics, indent=4))
 
@@ -400,23 +426,18 @@ def train(config, seed, data_loaders, num_epochs, trial=None, trial_prune_interv
             best_validation_accuracy = validation_accuracy
             torch.save(model, model_output_path)
             logging.info(f'Saved best model with accuracy: {best_validation_accuracy:.2f}%')
+    
+    if not trial_run:
+        # Upload best model to W&B
+        logging.info(f"Uploading model to W&B: {model_output_path}")
+        wandb.save(model_output_path)
+        artifact_name = model_output_path.split("/")[-1]
+        artifact = wandb.Artifact(artifact_name, type='model')
+        artifact.add_file(model_output_path)
+        run.log_artifact(artifact)
 
-        # Prune trials if requested
-        if trial and trial_prune_interval and (epoch + 1) % trial_prune_interval == 0:
-            trial.report(validation_accuracy, epoch)
-            if trial.should_prune():
-                raise optuna.TrialPruned()
-            
-    # Upload best model to W&B
-    logging.info(f"Uploading model to W&B: {model_output_path}")
-    wandb.save(model_output_path)
-    artifact_name = model_output_path.split("/")[-1]
-    artifact = wandb.Artifact(artifact_name, type='model')
-    artifact.add_file(model_output_path)
-    run.log_artifact(artifact)
-
-    # Mark the run as finished
-    run.finish()
+        # Mark the run as finished
+        run.finish()
 
     # Return the best validation accuracy
     return best_validation_accuracy
@@ -498,104 +519,112 @@ def evaluate(model, test_loader):
     return accuracy, average_loss, all_labels, all_predictions, misclassifications
 
 
-def tune(config, seeds, data_loaders, n_epochs, n_trials, trial_prune_interval):
-    # Create the optuna study
-    seed = seeds[0]
-    sampler = optuna.samplers.TPESampler(seed=seed)
-    pruner = optuna.pruners.HyperbandPruner()
-    study = optuna.create_study(
-        direction="maximize",
-        study_name=PROJECT_NAME,
-        storage=OPTUNA_STORAGE_URI,
-        sampler=sampler,
-        pruner=pruner,
-        load_if_exists=True
-    )
+def sweep():
+    # Initialize W&B
+    run = wandb.init()
+    
+    # Retrieve hyperparameters from wandb.config
+    config = wandb.config
+    seeds = config.seeds
+    num_epochs = config.num_epochs
 
-    wandb_kwargs = {"project": PROJECT_NAME}
-    wandbc = WeightsAndBiasesCallback(wandb_kwargs=wandb_kwargs, as_multirun=True)
+    # Initialize the run configuration
+    run_config = {**DEFAULT_CONFIG}
 
-    _config = config
-
-    # Define the objective function for the Optuna study
-    @wandbc.track_in_wandb()
-    def _objective(trial):
-        # Define the search space for each model type
-        model_id = trial.suggest_categorical('model_id', ["CNN", "LeNet5"])
+    # Map the sweep parameters to your model configuration
+    if config.model_id:
         model_params = {}
-        if model_id == "CNN":
-            conv1_filters = trial.suggest_int('conv1_filters', 16, 64)
-            conv2_filters = trial.suggest_int('conv2_filters', 32, 128)
-            fc1_neurons = trial.suggest_int('fc1_neurons', 500, 2000)
-            fc2_neurons = trial.suggest_int('fc2_neurons', 10, 100)
+        if config.model_id == "CNN":
             model_params = {
-                "conv1_filters": conv1_filters,
-                "conv2_filters": conv2_filters,
-                "fc1_neurons": fc1_neurons,
-                "fc2_neurons": fc2_neurons
+                "conv1_filters": config.model_cnn_conv1_filters,
+                "conv2_filters": config.model_cnn_conv2_filters,
+                "fc1_neurons": config.model_cnn_fc1_neurons,
+                "fc2_neurons": config.model_cnn_fc2_neurons
             }
-
-        # Define optimizer search space
-        optimizer_id = trial.suggest_categorical('optimizer_id', ["Adam", "SGD"])
-        optimizer_params = {}
-        if optimizer_id == "Adam":
-            lr = trial.suggest_loguniform('adam_lr', 1e-5, 1e-1)
-            optimizer_params = {"lr": lr}
-        elif optimizer_id == "SGD":
-            lr = trial.suggest_loguniform('sgd_lr', 1e-5, 1e-1)
-            momentum = trial.suggest_uniform('momentum', 0.0, 0.9)
-            optimizer_params = {"lr": lr, "momentum": momentum}
-
-        # Define learning rate scheduler search space
-        scheduler_id = trial.suggest_categorical('scheduler_id', ["StepLR"])
-        scheduler_params = {}
-        if scheduler_id == "StepLR":
-            step_size = trial.suggest_int('step_size', 1, 10)
-            gamma = trial.suggest_uniform('gamma', 0.1, 0.9)
-            scheduler_params = {"step_size": step_size, "gamma": gamma}
-
-        # Assemble the trial configuration
-        config = {
-            **_config,
-            "model": {
-                "id": model_id,
-                "params": model_params
-            },
-            "optimizer": {
-                "id": optimizer_id,
-                "params": optimizer_params
-            },
-            "learning_rate_scheduler": {
-                "id": scheduler_id,
-                "params": scheduler_params
-            }
+        config["model"] = {
+            "id": config.model_id,
+            "params": model_params
         }
 
-        # Train with multiple seeds to average out the randomness
-        accuracies = []
-        for seed in seeds:
-            accuracy = train(config, seed, data_loaders, n_epochs, trial=trial, trial_prune_interval=trial_prune_interval)
-            accuracies.append(accuracy)
-        return np.mean(accuracies)
-    
-    # Run the optuna study
-    study.optimize(_objective, n_trials=n_trials, callbacks=[wandbc])
+    # Map the sweep parameters to your model configuration
+    if config.optimizer_id:
+        optimizer_params = {}
+        if config.optimizer_id == "Adam":
+            optimizer_params = {"lr": config.optimizer_lr}
+        elif config.optimizer_id == "SGD":
+            optimizer_params = {"lr": config.optimizer_lr, "momentum": 0.9}  # Example value for momentum
+        run_config["optimizer"] = {
+            "id": config.optimizer_id,
+            "params": optimizer_params
+        }
 
-    # Return the study result
-    study_results = {
-        "num_trials": len(study.trials),
-        "num_pruned_trials": len([t for t in study.trials if t.state == optuna.trial.TrialState.PRUNED]),
-        "best_value": study.best_trial.value,
-        "best_params": study.best_trial.params,
-    }
-    logger.info(json.dumps(study_results, indent=4))
-    return study_results
+    # Map the sweep parameters to your optimizer configuration
+    if config.lr_scheduler_id:
+        lr_scheduler_params = {}
+        if config.lr_scheduler_id == "StepLR":
+            lr_scheduler_params = {
+                "step_size": config.lr_scheduler_steplr_step_size,
+                "gamma": 0.1
+            }
+        run_config["lr_scheduler"] = {
+            "id": config.lr_scheduler_id,
+            "params": lr_scheduler_params
+        }
 
+    # Map the sweep parameters to your optimizer configuration
+    if config.loss_function_id:
+        loss_function_params = {}
+        run_config["loss_function"] = {
+            "id": config.loss_function_id,
+            "params": loss_function_params
+        }
+
+    data_loaders = create_data_loaders(run_config)
+
+    # Call your train function
+    best_validation_accuracies = []
+    for seed in seeds:
+        best_validation_accuracy = train(run_config, seed, data_loaders, num_epochs, trial_run=run)
+        best_validation_accuracies.append(best_validation_accuracy)
+    best_validation_accuracy = np.mean(best_validation_accuracies)
+        
+    # Log the final metrics
+    wandb.log({"best_validation_accuracy": best_validation_accuracy})
+
+    # Finish the wandb run
+    wandb.finish()
+
+
+def create_data_loaders(config, validation_split=0.2):
+    # Define transformations
+    transform = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize((0.5,), (0.5,))
+    ])
+
+    # Load datasets
+    full_train_dataset = torchvision.datasets.MNIST(root='./data', train=True, download=True, transform=transform)
+    test_dataset = torchvision.datasets.MNIST(root='./data', train=False, download=True, transform=transform)
+
+    # Split the full training dataset into training and validation sets
+    train_size = int((1 - validation_split) * len(full_train_dataset))
+    validation_size = len(full_train_dataset) - train_size
+    train_dataset, validation_dataset = random_split(full_train_dataset, [train_size, validation_size])
+
+    # Setup the data loaders
+    batch_size = config['data_loader_batch_size']
+    num_workers = multiprocessing.cpu_count()
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers, pin_memory=True)
+    validation_loader = DataLoader(validation_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=True)
+    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=True)
+    data_loaders = {'train': train_loader, 'validation': validation_loader, 'test': test_loader}
+
+    return data_loaders
 
 def _main():
     # Parse command line arguments
     parser = argparse.ArgumentParser(description='Train, evaluate, or tune a CNN on MNIST dataset.')
-    parser.add_argument('mode', choices=['train', 'eval', 'tune'], help='Mode to run the script in')
+    parser.add_argument('mode', choices=['train', 'eval', 'tune'], default="train", help='Mode to run the script in')
     parser.add_argument("--validation_split", type=float, default=0.2, help="Validation split ratio")
     parser.add_argument('--model_path', type=str, default="outputs/best_model.pth", help='Path to the model file for evaluation')
     parser.add_argument('--n_epochs', type=int, default=10, help='Number of epochs to train the model for')
@@ -612,54 +641,7 @@ def _main():
     seed = args.seeds[0]
     set_seed(seed)
 
-    # Define the configuration
-    config = {
-        "model_output_dir": "outputs", # Path to save the best model to
-        'data_loader_batch_size': 64, # Batch size for the data loader
-        'image_logging_interval': 5, # Log confusion matrix every 5 epochs
-        "model" : {
-            "id" : "CNN"
-        },
-        "optimizer" : {
-            "id" : "Adam", # "Adam", "SGD"
-            "params" : {
-                "lr" : 0.001 # Learning rate
-            }
-        },
-        "learning_rate_scheduler" : {
-            "id" : "StepLR", # "StepLR"
-            "params" : {
-                "step_size" : 7, # Step size for the learning rate scheduler
-                "gamma" : 0.1 # Multiplicative factor of learning rate decay
-            }
-        },
-        "loss_function" : {
-            "id" : "CrossEntropyLoss" # "CrossEntropyLoss"
-        }
-    }
-
-    # Define transformations
-    transform = transforms.Compose([
-        transforms.ToTensor(),
-        transforms.Normalize((0.5,), (0.5,))
-    ])
-
-    # Load datasets
-    full_train_dataset = torchvision.datasets.MNIST(root='./data', train=True, download=True, transform=transform)
-    test_dataset = torchvision.datasets.MNIST(root='./data', train=False, download=True, transform=transform)
-
-    # Split the full training dataset into training and validation sets
-    train_size = int((1 - args.validation_split) * len(full_train_dataset))
-    validation_size = len(full_train_dataset) - train_size
-    train_dataset, validation_dataset = random_split(full_train_dataset, [train_size, validation_size])
-
-    # Setup the data loaders
-    batch_size = config['data_loader_batch_size']
-    num_workers = multiprocessing.cpu_count()
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers, pin_memory=True)
-    validation_loader = DataLoader(validation_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=True)
-    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=True)
-    data_loaders = {'train': train_loader, 'validation': validation_loader, 'test': test_loader}
+    config = {**DEFAULT_CONFIG}
 
     def _eval(model_path, test_loader):
         accuracy, average_loss, all_labels, all_predictions, _ = evaluate(model_path, test_loader)
@@ -671,15 +653,19 @@ def _main():
     # Train the model
     if args.mode == 'train':
         seed = args.seeds[0]
+        data_loaders = create_data_loaders(config, args.validation_split)
+        test_loader = data_loaders['test']
         train(config, seed, data_loaders, args.n_epochs)
         _eval(args.model_path, test_loader)
     # Evaluate a model
     elif args.mode == 'eval':
+        data_loaders = create_data_loaders(config, args.validation_split)
+        test_loader = data_loaders['test']
         _eval(args.model_path, test_loader)
     # Perform hyperparameter tuning
-    elif args.mode == 'tune':
-        n_epochs = int(math.ceil(args.n_epochs * args.trial_epoch_ratio))
-        tune(config, args.seeds, data_loaders, n_epochs, args.n_trials, trial_prune_interval=args.trial_prune_interval)
+    #elif args.mode == 'tune':
+    #    sweep_id = wandb.sweep(sweep_config, project=PROJECT_NAME)
+    #    wandb.agent(sweep_id, function=sweep, count=4)
 
 def main():
     try: _main()
