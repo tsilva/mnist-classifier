@@ -6,6 +6,8 @@ channels:
   - defaults
 dependencies:
   - python=3.8
+  - tqdm
+  - pyyaml
   - numpy
   - matplotlib
   - pytorch
@@ -15,3 +17,4 @@ dependencies:
   - seaborn
   - wandb
   - pip
+    
