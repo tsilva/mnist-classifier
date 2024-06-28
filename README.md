@@ -129,12 +129,12 @@ The project includes three CNN architectures:
 
 The following table shows the test set accuracy achieved for each model on each dataset:
 
-| Model                              | MNIST   | FashionMNIST |
-|------------------------------------|---------|--------------|
-| ResNet18 (torchvision, pretrained) | 99.4%   | N/A          |
-| LeNet5                             | 98.54%  | N/A          |
-| Simple CNN                         | 99.65%  | N/A          |
-| Advanced CNN                       | 99.65%  | N/A          |
+| Model                              | MNIST   | FashionMNIST | QMNIST | KMNIST | EMNIST-digits |
+|------------------------------------|---------|--------------| ------ | ------ | ------------- |
+| ResNet18 (torchvision, pretrained) | 99.4%   | N/A          | N/A    | N/A    | N/A           |
+| LeNet5                             | 98.54%  | N/A          | N/A    | N/A    | N/A           |
+| Simple CNN                         | 99.65%  | N/A          | N/A    | N/A    | N/A           |
+| Advanced CNN                       | 99.65%  | N/A          | N/A    | N/A    | N/A           |
 
 ## Configuration
 
