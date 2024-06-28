@@ -5,6 +5,7 @@ import time
 import random
 import argparse
 import torch
+import atexit
 import multiprocessing
 import logging
 import torch.nn as nn
@@ -34,6 +35,39 @@ if str(DEVICE) == "cpu":
     logging.warning("CUDA is not available. Running on CPU. Press Enter to continue...")
     input()
 
+def cleanup():
+    if wandb.run: wandb.finish()
+atexit.register(cleanup)
+
+def init_model_weights(model, mode):
+    if mode == 'he':
+        for m in model.modules():
+            if isinstance(m, nn.Conv2d):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+            elif isinstance(m, nn.Linear):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+
+def load_model(model_path):
+    if model_path.startswith('https://wandb.ai/'):
+        with wandb.init(project=PROJECT_NAME):
+            url_tokens = model_path.split('/')
+            entity_id = url_tokens[3]
+            project_name = url_tokens[4]
+            run_id = url_tokens[6]
+            model_file_name = f"best_model_{run_id}.pth"
+            artifact_path = f"{entity_id}/{project_name}/{model_file_name}:latest"
+            logging.info(f"Downloading model artifact: {artifact_path}")
+            artifact = wandb.use_artifact(artifact_path, type='model')
+            artifact_dir = artifact.download()
+            model_path = f"{artifact_dir}/{model_file_name}"
+    
+    if model_path.endswith('.pth'): model = torch.load(model_path)
+    elif model_path.endswith('.onnx'): model = torch.onnx.load(model_path)
+    else: raise ValueError(f"Unsupported model file format: {model_path}")
+    return model
+    
 def load_config(hyperparams_path=None):
     hyperparams = {}
 
@@ -44,6 +78,15 @@ def load_config(hyperparams_path=None):
     return {
         "logging" : {
             "image_interval": 5,
+        },
+        "data_loader": {
+            "batch_size": 64
+        },
+        "optimizer" : {
+            "id": "Adam"
+        },
+        "loss_function": {
+            "id": "CrossEntropyLoss"
         },
         **hyperparams
     }
@@ -58,7 +101,7 @@ def set_seed(seed):
     torch.backends.cudnn.benchmark = False
 
 class LeNet5(nn.Module):
-    def __init__(self, conv1_filters=6, conv2_filters=16, conv3_filters=120, fc1_neurons=84, fc2_neurons=10):
+    def __init__(self, conv1_filters=6, conv2_filters=16, conv3_filters=120, fc1_neurons=84, fc2_neurons=10, weight_init=None):
         super(LeNet5, self).__init__()
 
         # Store the hyperparameters
@@ -92,6 +135,8 @@ class LeNet5(nn.Module):
             nn.Linear(fc1_neurons, fc2_neurons)  # Input shape: (batch_size, fc1_neurons)
         )
 
+        init_model_weights(self, weight_init)
+
     def forward(self, x):
         # Pass through the encoder
         x = self.encoder(x)  # Shape: (batch_size, conv2_filters, 5, 5)
@@ -109,7 +154,7 @@ class LeNet5(nn.Module):
         return x  # Shape: (batch_size, fc2_neurons)
 
 class SimpleCNN(nn.Module):
-    def __init__(self, conv1_filters=32, conv2_filters=64, fc1_neurons=1000, fc2_neurons=10):
+    def __init__(self, conv1_filters=32, conv2_filters=64, fc1_neurons=1000, fc2_neurons=10, weight_init=None):
         super(SimpleCNN, self).__init__()
         
         self.encoder = nn.Sequential(
@@ -139,6 +184,8 @@ class SimpleCNN(nn.Module):
             nn.Linear(fc1_neurons, fc2_neurons)
         )
 
+        init_model_weights(self, weight_init)
+
     def forward(self, x):
         # Encode input using convolutional layers
         x = self.encoder(x) 
@@ -153,7 +200,7 @@ class SimpleCNN(nn.Module):
         return x # Shape: (batch_size, fc2_neurons)
 
 class AdvancedCNN(nn.Module):
-    def __init__(self):
+    def __init__(self, weight_init=None):
         super(AdvancedCNN, self).__init__()
         
         # Layer 1
@@ -191,6 +238,8 @@ class AdvancedCNN(nn.Module):
         self.fc3_bn = nn.BatchNorm1d(84)
         
         self.fc4 = nn.Linear(84, 10)
+
+        init_model_weights(self, weight_init)
         
     def _forward_features(self, x):
         x = F.relu(self.conv1_bn(self.conv1(x)))
@@ -261,11 +310,8 @@ def build_loss_function(loss_function_config):
 def create_data_loaders(batch_size=64, validation_split=0.2):
     # Define transformations for training data with augmentation
     train_transform = transforms.Compose([
-        transforms.RandomRotation(15),
-        transforms.RandomAffine(0, translate=(0.1, 0.1), scale=(0.9, 1.1), shear=10),
-        transforms.ColorJitter(brightness=0.2, contrast=0.2),
         transforms.ToTensor(),
-        transforms.Normalize((0.1307,), (0.3081,))
+        transforms.Normalize((0.5,), (0.5,))
     ])
 
     # Define transformations for validation and test data (no augmentation)
@@ -275,7 +321,7 @@ def create_data_loaders(batch_size=64, validation_split=0.2):
     ])
 
     # Load datasets
-    full_train_dataset = torchvision.datasets.MNIST(root='./data', train=True, download=True, transform=test_transform)
+    full_train_dataset = torchvision.datasets.MNIST(root='./data', train=True, download=True, transform=train_transform)
     test_dataset = torchvision.datasets.MNIST(root='./data', train=False, download=True, transform=test_transform)
 
     # Split the full training dataset into training and validation sets
@@ -314,7 +360,8 @@ def _train(config, data_loaders, n_epochs):
     # Train for X epochs
     best_validation_accuracy = 0.0
     best_model_state = None
-    for epoch in tqdm(range(n_epochs), desc="Training model"):
+    best_epoch = None
+    for epoch in tqdm(range(1, n_epochs + 1), desc="Training model"):
         # Set the model in training mode
         model.train()
 
@@ -352,7 +399,9 @@ def _train(config, data_loaders, n_epochs):
         train_accuracy = 100 * correct / total
 
         # Evaluate the model on the test set
-        validation_accuracy, validation_loss, _, _, _, _, _, _  = _evaluate(model, data_loaders, "validation", training_epoch=epoch)
+        eval_metrics = _evaluate(model, data_loaders, "validation")
+        validation_accuracy = eval_metrics["validation_accuracy"]
+        validation_loss = eval_metrics["validation_loss"]
         
         # Update the learning rate based on current validation loss
         if lr_scheduler: lr_scheduler.step(validation_loss)
@@ -362,7 +411,8 @@ def _train(config, data_loaders, n_epochs):
             "epoch": epoch,
             "train_loss": train_loss,
             "train_accuracy": train_accuracy,
-            "best_validation_accuracy": best_validation_accuracy
+            "best_validation_accuracy": best_validation_accuracy,
+            **eval_metrics
         }
         if lr_scheduler: metrics["learning_rate"] = lr_scheduler.get_last_lr()[0]
 
@@ -372,12 +422,17 @@ def _train(config, data_loaders, n_epochs):
         # If the model is the best so far, save it to disk
         if validation_accuracy > best_validation_accuracy:
             best_validation_accuracy = validation_accuracy
+            best_epoch = epoch
             best_model_state = model.state_dict()
             logging.debug(f'Saved best model with accuracy: {best_validation_accuracy:.2f}%')
 
-    # Return the best validation accuracy
-    last_epoch = epoch
-    return best_validation_accuracy, best_model_state, last_epoch
+    # Return training results
+    return {
+        "best_validation_accuracy": best_validation_accuracy,
+        "best_model_state": best_model_state,
+        "best_epoch": best_epoch,
+        "last_epoch": epoch
+    }
 
 def train(config, data_loaders, n_epochs, model_output_dir): 
     # Perform training within the context of a W&B run
@@ -387,7 +442,8 @@ def train(config, data_loaders, n_epochs, model_output_dir):
     run_id = f"train__{date_s}__{model_id}"
     with wandb.init(project=PROJECT_NAME, id=run_id, config=config) as run:
         # Perform training
-        best_model_accuracy, best_model_state, last_epoch = _train(config, data_loaders, n_epochs)
+        train_results = _train(config, data_loaders, n_epochs)
+        best_model_state = train_results["best_model_state"]
 
         # Save the best model to disk
         best_model = build_model(model_config, model_state=best_model_state)
@@ -403,39 +459,27 @@ def train(config, data_loaders, n_epochs, model_output_dir):
         run.log_artifact(artifact)
 
         # Evaluate the best model on the test set
-        _evaluate(best_model, data_loaders, "test", training_epoch=last_epoch)
-        
+        eval_results = _evaluate(best_model, data_loaders, "test", log_confusion_matrix=True, log_misclassifications=True)
+        wandb.log(eval_results)
+
         # Return training result
-        return best_model_accuracy, best_model_path
+        return {
+            **train_results,
+            "best_model_path": best_model_path,
+            **eval_results
+        }
 
 def evaluate(model, data_loaders, loader_type):
     date_s = time.strftime('%Y%m%dT%H%M%S')
     run_id = f"evaluate__{date_s}"
     with wandb.init(project=PROJECT_NAME, id=run_id): 
-        return _evaluate(model, data_loaders, loader_type)
+        metrics = _evaluate(model, data_loaders, loader_type)
+        wandb.log(metrics)
+        return metrics
 
-def _evaluate(model, data_loaders, loader_type, training_epoch=None):
-    def _load_model(model_path):
-        if model_path.startswith('https://wandb.ai/'):
-            with wandb.init(project=PROJECT_NAME):
-                url_tokens = model_path.split('/')
-                entity_id = url_tokens[3]
-                project_name = url_tokens[4]
-                run_id = url_tokens[6]
-                model_file_name = f"best_model_{run_id}.pth"
-                artifact_path = f"{entity_id}/{project_name}/{model_file_name}:latest"
-                logging.info(f"Downloading model artifact: {artifact_path}")
-                artifact = wandb.use_artifact(artifact_path, type='model')
-                artifact_dir = artifact.download()
-                model_path = f"{artifact_dir}/{model_file_name}"
-        
-        if model_path.endswith('.pth'): model = torch.load(model_path)
-        elif model_path.endswith('.onnx'): model = torch.onnx.load(model_path)
-        else: raise ValueError(f"Unsupported model file format: {model_path}")
-        return model
-    
+def _evaluate(model, data_loaders, loader_type, log_confusion_matrix=False, log_misclassifications=False):
     # Load the model if a path was provided
-    if isinstance(model, str): model = _load_model(model)
+    if isinstance(model, str): model = load_model(model)
     
     # Ensure the model is on the correct device
     model = model.to(DEVICE)
@@ -497,19 +541,28 @@ def _evaluate(model, data_loaders, loader_type, training_epoch=None):
     recall = recall_score(all_labels, all_predictions, average='weighted')
     f1 = f1_score(all_labels, all_predictions, average='weighted')
 
-    # In case evaluation is happening within a training 
-    # epoch then log the evaluation metrics to the W&B run
-    if training_epoch:
-        # Log confusion matrix
-        cm = confusion_matrix(all_labels, all_predictions)
+    # Initialize evaluation metrics to be returned to the caller
+    metrics = {
+        f"{loader_type}_accuracy": accuracy,
+        f"{loader_type}_loss": average_loss,
+        f"{loader_type}_precision": precision,
+        f"{loader_type}_recall": recall,
+        f"{loader_type}_f1": f1
+    }
+
+    # Log confusion matrix
+    if log_confusion_matrix:
+        confusion_matrix_data = confusion_matrix(all_labels, all_predictions)
         plt.figure(figsize=(10, 10))
-        sns.heatmap(cm, annot=True, fmt='d', cmap='Blues')
+        sns.heatmap(confusion_matrix_data, annot=True, fmt='d', cmap='Blues')
         plt.xlabel('Predicted')
         plt.ylabel('True')
         confusion_matrix_image = wandb.Image(plt)
         plt.close()
+        metrics[f"{loader_type}_confusion_matrix"] = confusion_matrix_image
 
-        # Log misclassifications
+    # Log misclassifications
+    if log_misclassifications:
         misclassified_images = []
         for img, true_label, pred_label in misclassifications[:25]:  # Limit to 25 images
             plt.figure(figsize=(2, 2))
@@ -518,19 +571,10 @@ def _evaluate(model, data_loaders, loader_type, training_epoch=None):
             plt.axis('off')
             misclassified_images.append(wandb.Image(plt))
             plt.close()
-        
-        # Log metrics to W&B
-        wandb.log({
-            f"{loader_type}_accuracy": accuracy,
-            f"{loader_type}_loss": average_loss,
-            f"{loader_type}_precision": precision,
-            f"{loader_type}_recall": recall,
-            f"{loader_type}_f1": f1,
-            f"{loader_type}_confusion_matrix": confusion_matrix_image,
-            f"{loader_type}_misclassified_images": misclassified_images,
-        }, step=training_epoch)
-
-    return accuracy, average_loss, precision, recall, f1, all_labels, all_predictions, misclassifications
+        metrics[f"{loader_type}_misclassified_images"] = misclassified_images
+    
+    # Return metrics
+    return metrics
 
 def sweep(seeds=[42]):        
     def _parse_sweep_config(sweep_config):

@@ -1,20 +1,2 @@
-data_loader:
-  batch_size: 64
 model:
   id: LeNet5
-  conv1_filters: 6
-  conv2_filters: 16
-  fc1_neurons: 120
-  fc2_neurons: 84
-  fc3_neurons: 10
-optimizer:
-  id: Adam
-  params:
-    lr: 0.004
-lr_scheduler:
-  id: StepLR
-  params:
-    step_size: 5
-    gamma: 0.1
-loss_function:
-  id: CrossEntropyLoss

@@ -1,12 +1,4 @@
-data_loader:
-  batch_size: 64
 model:
   id: SimpleCNN
-  conv1_filters: 32
-  conv2_filters: 64
-  fc1_neurons: 1000
-  fc2_neurons: 10
-optimizer:
-  id: Adam
-  params:
-    lr: 0.004
+lr_scheduler:
+  id: ReduceLROnPlateau
