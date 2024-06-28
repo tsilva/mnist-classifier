@@ -29,6 +29,11 @@ logger = logging.getLogger(__name__)
 # Indicate the device being used
 logger.info(f"Using device: {DEVICE}")
 
+# Make sure the user is aware if HW acceleration is not available
+if str(DEVICE) == "cpu":
+    logging.warning("CUDA is not available. Running on CPU. Press Enter to continue...")
+    input()
+
 def load_config(hyperparams_path=None):
     hyperparams = {}
 
@@ -103,85 +108,9 @@ class LeNet5(nn.Module):
         # Return the output
         return x  # Shape: (batch_size, fc2_neurons)
 
-class VGG11(nn.Module):
-    def __init__(self, num_classes=10):
-        super(VGG11, self).__init__()
-        self.encoder = nn.Sequential(
-            nn.Conv2d(1, 64, kernel_size=3, padding=1),
-            nn.ReLU(inplace=True),
-            nn.MaxPool2d(kernel_size=2, stride=2),
-            nn.Conv2d(64, 128, kernel_size=3, padding=1),
-            nn.ReLU(inplace=True),
-            nn.MaxPool2d(kernel_size=2, stride=2),
-            nn.Conv2d(128, 256, kernel_size=3, padding=1),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(256, 256, kernel_size=3, padding=1),
-            nn.ReLU(inplace=True),
-            nn.MaxPool2d(kernel_size=2, stride=2),
-            nn.Conv2d(256, 512, kernel_size=3, padding=1),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(512, 512, kernel_size=3, padding=1),
-            nn.ReLU(inplace=True),
-            nn.MaxPool2d(kernel_size=2, stride=2),
-            nn.Conv2d(512, 512, kernel_size=3, padding=1),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(512, 512, kernel_size=3, padding=1),
-            nn.ReLU(inplace=True),
-            nn.MaxPool2d(kernel_size=2, stride=2),
-        )
-        self.classifier = nn.Sequential(
-            nn.Linear(512 * 1 * 1, 4096),
-            nn.ReLU(inplace=True),
-            nn.Dropout(),
-            nn.Linear(4096, 4096),
-            nn.ReLU(inplace=True),
-            nn.Dropout(),
-            nn.Linear(4096, num_classes),
-        )
-
-    def forward(self, x):
-        x = self.encoder(x)
-        x = x.view(x.size(0), -1)
-        x = self.classifier(x)
-        return x
-
-class AlexNet(nn.Module):
-    def __init__(self, num_classes=10):
-        super(AlexNet, self).__init__()
-        self.encoder = nn.Sequential(
-            nn.Conv2d(1, 64, kernel_size=11, stride=4, padding=2),
-            nn.ReLU(inplace=True),
-            nn.MaxPool2d(kernel_size=3, stride=2),
-            nn.Conv2d(64, 192, kernel_size=5, padding=2),
-            nn.ReLU(inplace=True),
-            nn.MaxPool2d(kernel_size=3, stride=2),
-            nn.Conv2d(192, 384, kernel_size=3, padding=1),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(384, 256, kernel_size=3, padding=1),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(256, 256, kernel_size=3, padding=1),
-            nn.ReLU(inplace=True),
-            nn.MaxPool2d(kernel_size=3, stride=2),
-        )
-        self.classifier = nn.Sequential(
-            nn.Dropout(),
-            nn.Linear(256 * 1 * 1, 4096),  # Adjusted for the 28x28 input size
-            nn.ReLU(inplace=True),
-            nn.Dropout(),
-            nn.Linear(4096, 4096),
-            nn.ReLU(inplace=True),
-            nn.Linear(4096, num_classes),
-        )
-
-    def forward(self, x):
-        x = self.encoder(x)
-        x = x.view(x.size(0), -1)
-        x = self.classifier(x)
-        return x
-
-class CNN(nn.Module):
+class SimpleCNN(nn.Module):
     def __init__(self, conv1_filters=32, conv2_filters=64, fc1_neurons=1000, fc2_neurons=10):
-        super(CNN, self).__init__()
+        super(SimpleCNN, self).__init__()
         
         self.encoder = nn.Sequential(
             # First convolutional layer
@@ -223,14 +152,80 @@ class CNN(nn.Module):
         # Return the output
         return x # Shape: (batch_size, fc2_neurons)
 
+class AdvancedCNN(nn.Module):
+    def __init__(self):
+        super(AdvancedCNN, self).__init__()
+        
+        # Layer 1
+        self.conv1 = nn.Conv2d(in_channels=1, out_channels=32, kernel_size=5, stride=1, padding=2)
+        self.conv1_bn = nn.BatchNorm2d(32)
+        
+        # Layer 2
+        self.conv2 = nn.Conv2d(in_channels=32, out_channels=32, kernel_size=5, stride=1, padding=2, bias=False)
+        self.conv2_bn = nn.BatchNorm2d(32)
+        
+        # Layer 3
+        self.conv3 = nn.Conv2d(in_channels=32, out_channels=64, kernel_size=3, stride=1, padding=1)
+        self.conv3_bn = nn.BatchNorm2d(64)
+        
+        # Layer 4
+        self.conv4 = nn.Conv2d(in_channels=64, out_channels=64, kernel_size=3, stride=1, padding=1, bias=False)
+        self.conv4_bn = nn.BatchNorm2d(64)
+        
+        # Dropout layer
+        self.dropout = nn.Dropout(0.5)
+
+        # Calculate the flattened size after the last pooling layer
+        dummy_input = torch.randn(1, 1, 28, 28)
+        dummy_output = self._forward_features(dummy_input)
+        flattened_size = dummy_output.numel()
+
+        # Fully connected layers
+        self.fc1 = nn.Linear(flattened_size, 256, bias=False)
+        self.fc1_bn = nn.BatchNorm1d(256)
+        
+        self.fc2 = nn.Linear(256, 128, bias=False)
+        self.fc2_bn = nn.BatchNorm1d(128)
+        
+        self.fc3 = nn.Linear(128, 84, bias=False)
+        self.fc3_bn = nn.BatchNorm1d(84)
+        
+        self.fc4 = nn.Linear(84, 10)
+        
+    def _forward_features(self, x):
+        x = F.relu(self.conv1_bn(self.conv1(x)))
+        x = self.conv2_bn(self.conv2(x))
+        x = F.relu(x)
+        x = F.max_pool2d(x, kernel_size=2, stride=2)
+        x = self.dropout(x)
+        
+        x = F.relu(self.conv3_bn(self.conv3(x)))
+        x = self.conv4_bn(self.conv4(x))
+        x = F.relu(x)
+        x = F.max_pool2d(x, kernel_size=2, stride=2)
+        x = self.dropout(x)
+        
+        x = torch.flatten(x, 1)
+        return x
+
+    def forward(self, x):
+        x = self._forward_features(x)
+        x = F.relu(self.fc1_bn(self.fc1(x)))
+        x = self.dropout(x)  # Dropout after first FC layer
+        x = F.relu(self.fc2_bn(self.fc2(x)))
+        x = self.dropout(x)  # Dropout after second FC layer
+        x = F.relu(self.fc3_bn(self.fc3(x)))
+        x = self.dropout(x)  # Dropout after third FC layer
+        x = self.fc4(x)
+        return F.log_softmax(x, dim=1)
+
 def build_model(model_config, model_state=None):
     model_id = model_config['id']
     model_params = model_config.get('params', {})
     model = {
-        "CNN": CNN,
+        "SimpleCNN": SimpleCNN,
         "LeNet5": LeNet5,
-        "VGG11": VGG11,
-        "AlexNet": AlexNet
+        "AdvancedCNN": AdvancedCNN
     }[model_id](**model_params)
     if model_state: model.load_state_dict(model_state)
     model = model.to(DEVICE)
@@ -250,7 +245,8 @@ def build_lr_scheduler(optimizer, scheduler_config):
     scheduler_id = scheduler_config['id']
     scheduler_params = scheduler_config.get('params', {})
     scheduler = {
-        "StepLR": optim.lr_scheduler.StepLR
+        "StepLR": optim.lr_scheduler.StepLR,
+        "ReduceLROnPlateau": optim.lr_scheduler.ReduceLROnPlateau
     }[scheduler_id](optimizer, **scheduler_params)
     return scheduler
 
@@ -263,15 +259,24 @@ def build_loss_function(loss_function_config):
     return loss_function
 
 def create_data_loaders(batch_size=64, validation_split=0.2):
-    # Define transformations
-    transform = transforms.Compose([
+    # Define transformations for training data with augmentation
+    train_transform = transforms.Compose([
+        transforms.RandomRotation(15),
+        transforms.RandomAffine(0, translate=(0.1, 0.1), scale=(0.9, 1.1), shear=10),
+        transforms.ColorJitter(brightness=0.2, contrast=0.2),
+        transforms.ToTensor(),
+        transforms.Normalize((0.1307,), (0.3081,))
+    ])
+
+    # Define transformations for validation and test data (no augmentation)
+    test_transform = transforms.Compose([
         transforms.ToTensor(),
         transforms.Normalize((0.5,), (0.5,))
     ])
 
     # Load datasets
-    full_train_dataset = torchvision.datasets.MNIST(root='./data', train=True, download=True, transform=transform)
-    test_dataset = torchvision.datasets.MNIST(root='./data', train=False, download=True, transform=transform)
+    full_train_dataset = torchvision.datasets.MNIST(root='./data', train=True, download=True, transform=test_transform)
+    test_dataset = torchvision.datasets.MNIST(root='./data', train=False, download=True, transform=test_transform)
 
     # Split the full training dataset into training and validation sets
     train_size = int((1 - validation_split) * len(full_train_dataset))
@@ -280,7 +285,7 @@ def create_data_loaders(batch_size=64, validation_split=0.2):
 
     # Setup the data loaders
     num_workers = multiprocessing.cpu_count()
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers, pin_memory=True)
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=True)
     validation_loader = DataLoader(validation_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=True)
     test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=True)
     data_loaders = {'train': train_loader, 'validation': validation_loader, 'test': test_loader}
@@ -288,10 +293,6 @@ def create_data_loaders(batch_size=64, validation_split=0.2):
     return data_loaders
 
 def _train(config, data_loaders, n_epochs):
-    # Retrieve logging configuration
-    logging_config = config['logging']
-    image_logging_interval = logging_config['image_interval']
-
     # Retrieve hyperparameters from the config
     model_config = config['model']
     optimizer_config = config["optimizer"]
@@ -300,7 +301,6 @@ def _train(config, data_loaders, n_epochs):
 
     # Unpack data loaders
     train_loader = data_loaders['train']
-    validation_loader = data_loaders['validation']
     
     # Build model, optimizer, learning rate scheduler, and loss function
     model = build_model(model_config)
@@ -347,41 +347,24 @@ def _train(config, data_loaders, n_epochs):
             all_labels.extend(labels.cpu().numpy())
             all_predictions.extend(predicted.cpu().numpy())
 
-        # Let the scheduler update the 
-        # learning rate now that the epoch is done
-        if lr_scheduler: lr_scheduler.step()
-
         # Calculate train loss and accuracy
         train_loss = running_loss / len(train_loader.dataset)
         train_accuracy = 100 * correct / total
 
         # Evaluate the model on the test set
-        validation_accuracy, validation_loss, validation_precision, validation_recall, validation_f1, validation_labels, validation_predictions, _  = evaluate(model, validation_loader)
+        validation_accuracy, validation_loss, _, _, _, _, _, _  = _evaluate(model, data_loaders, "validation", training_epoch=epoch)
+        
+        # Update the learning rate based on current validation loss
+        if lr_scheduler: lr_scheduler.step(validation_loss)
 
         # Create metrics
         metrics = {
             "epoch": epoch,
             "train_loss": train_loss,
             "train_accuracy": train_accuracy,
-            "validation_loss": validation_loss,
-            "validation_accuracy": validation_accuracy,
-            "validation_precision": validation_precision,
-            "validation_recall": validation_recall,
-            "validation_f1": validation_f1,
             "best_validation_accuracy": best_validation_accuracy
         }
         if lr_scheduler: metrics["learning_rate"] = lr_scheduler.get_last_lr()[0]
-
-        # Add images to metrics every X epochs
-        if epoch > 0 and epoch % image_logging_interval == 0: 
-            cm = confusion_matrix(validation_labels, validation_predictions)
-            plt.figure(figsize=(10, 10))
-            sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', xticklabels=np.arange(10), yticklabels=np.arange(10))
-            plt.xlabel('Predicted')
-            plt.ylabel('True')
-            confusion_matrix_image = wandb.Image(plt)
-            metrics["confusion_matrix"] = confusion_matrix_image
-            plt.close()
 
         # Log metrics to W&B
         wandb.log(metrics, step=epoch)
@@ -393,7 +376,8 @@ def _train(config, data_loaders, n_epochs):
             logging.debug(f'Saved best model with accuracy: {best_validation_accuracy:.2f}%')
 
     # Return the best validation accuracy
-    return best_validation_accuracy, best_model_state
+    last_epoch = epoch
+    return best_validation_accuracy, best_model_state, last_epoch
 
 def train(config, data_loaders, n_epochs, model_output_dir): 
     # Perform training within the context of a W&B run
@@ -403,7 +387,7 @@ def train(config, data_loaders, n_epochs, model_output_dir):
     run_id = f"train__{date_s}__{model_id}"
     with wandb.init(project=PROJECT_NAME, id=run_id, config=config) as run:
         # Perform training
-        best_model_accuracy, best_model_state = _train(config, data_loaders, n_epochs)
+        best_model_accuracy, best_model_state, last_epoch = _train(config, data_loaders, n_epochs)
 
         # Save the best model to disk
         best_model = build_model(model_config, model_state=best_model_state)
@@ -418,10 +402,19 @@ def train(config, data_loaders, n_epochs, model_output_dir):
         artifact.add_file(best_model_path)
         run.log_artifact(artifact)
 
+        # Evaluate the best model on the test set
+        _evaluate(best_model, data_loaders, "test", training_epoch=last_epoch)
+        
         # Return training result
         return best_model_accuracy, best_model_path
 
-def evaluate(model, test_loader):
+def evaluate(model, data_loaders, loader_type):
+    date_s = time.strftime('%Y%m%dT%H%M%S')
+    run_id = f"evaluate__{date_s}"
+    with wandb.init(project=PROJECT_NAME, id=run_id): 
+        return _evaluate(model, data_loaders, loader_type)
+
+def _evaluate(model, data_loaders, loader_type, training_epoch=None):
     def _load_model(model_path):
         if model_path.startswith('https://wandb.ai/'):
             with wandb.init(project=PROJECT_NAME):
@@ -459,8 +452,9 @@ def evaluate(model, test_loader):
     misclassifications = []
 
     # Evaluate the model
+    loader = data_loaders[loader_type]
     with torch.no_grad():  # Disable gradient tracking (no backpropagation needed for evaluation)
-        for images, labels in test_loader:
+        for images, labels in loader:
             # Move images and labels to the device for inference
             images, labels = images.to(DEVICE), labels.to(DEVICE)
 
@@ -502,6 +496,39 @@ def evaluate(model, test_loader):
     precision = precision_score(all_labels, all_predictions, average='weighted')
     recall = recall_score(all_labels, all_predictions, average='weighted')
     f1 = f1_score(all_labels, all_predictions, average='weighted')
+
+    # In case evaluation is happening within a training 
+    # epoch then log the evaluation metrics to the W&B run
+    if training_epoch:
+        # Log confusion matrix
+        cm = confusion_matrix(all_labels, all_predictions)
+        plt.figure(figsize=(10, 10))
+        sns.heatmap(cm, annot=True, fmt='d', cmap='Blues')
+        plt.xlabel('Predicted')
+        plt.ylabel('True')
+        confusion_matrix_image = wandb.Image(plt)
+        plt.close()
+
+        # Log misclassifications
+        misclassified_images = []
+        for img, true_label, pred_label in misclassifications[:25]:  # Limit to 25 images
+            plt.figure(figsize=(2, 2))
+            plt.imshow(img.squeeze(), cmap='gray')
+            plt.title(f'True: {true_label}, Pred: {pred_label}')
+            plt.axis('off')
+            misclassified_images.append(wandb.Image(plt))
+            plt.close()
+        
+        # Log metrics to W&B
+        wandb.log({
+            f"{loader_type}_accuracy": accuracy,
+            f"{loader_type}_loss": average_loss,
+            f"{loader_type}_precision": precision,
+            f"{loader_type}_recall": recall,
+            f"{loader_type}_f1": f1,
+            f"{loader_type}_confusion_matrix": confusion_matrix_image,
+            f"{loader_type}_misclassified_images": misclassified_images,
+        }, step=training_epoch)
 
     return accuracy, average_loss, precision, recall, f1, all_labels, all_predictions, misclassifications
 
@@ -551,7 +578,7 @@ def main():
     parser = argparse.ArgumentParser(description='Train, evaluate, or tune a CNN on MNIST dataset.')
     parser.add_argument('mode', choices=['train', 'eval', 'sweep'], help='Mode to run the script in')
     parser.add_argument("--seed", type=int, default=42, help="Random seeds to use for training")
-    parser.add_argument('--n_epochs', type=int, default=50, help='Number of epochs to train the model for')
+    parser.add_argument('--n_epochs', type=int, default=50, help='Number of epochs to train the model for') # TODO: move to hyperparams
     parser.add_argument('--hyperparams_path', type=str, default="configs/hyperparams/LeNet5.yml", help='Path to the hyperparameters file')
     parser.add_argument('--model_path', type=str, default="outputs/best_model.pth", help='Path to the model file for evaluation')
     parser.add_argument('--model_output_dir', type=str, default="outputs", help='Directory to save the model file')
@@ -566,28 +593,8 @@ def main():
     data_loaders = create_data_loaders(batch_size=batch_size)
 
     # Train the model
-    if args.mode == 'train':
-        _, best_model_path = train(config, data_loaders, args.n_epochs, args.model_output_dir)
-        test_loader = data_loaders['test']
-        accuracy, average_loss, precision, recall, f1, all_labels, all_predictions, _ = evaluate(best_model_path, test_loader)
-        cm = confusion_matrix(all_labels, all_predictions)
-        logging.info(f"Test Set - Loss: {average_loss:.4f}")
-        logging.info(f"Test Set - Accuracy: {accuracy:.2f}%")
-        logging.info(f"Test Set - Precision: {precision:.4f}")
-        logging.info(f"Test Set - Recall: {recall:.4f}")
-        logging.info(f"Test Set - F1: {f1:.4f}")
-        logging.info(f"Test Set - Confusion Matrix:\n{cm}")
-    # Evaluate a model
-    elif args.mode == 'eval':
-        test_loader = data_loaders['test']
-        accuracy, average_loss, precision, recall, f1, all_labels, all_predictions, _ = evaluate(args.model_path, test_loader)
-        cm = confusion_matrix(all_labels, all_predictions)
-        logging.info(f"Test Set - Loss: {average_loss:.4f}")
-        logging.info(f"Test Set - Accuracy: {accuracy:.2f}%")
-        logging.info(f"Test Set - Precision: {precision:.4f}")
-        logging.info(f"Test Set - Recall: {recall:.4f}")
-        logging.info(f"Test Set - F1: {f1:.4f}")
-        logging.info(f"Test Set - Confusion Matrix:\n{cm}")
+    if args.mode == 'train': train(config, data_loaders, args.n_epochs, args.model_output_dir)
+    elif args.mode == 'eval': evaluate(args.model_path, data_loaders, "test")
 
 if __name__ == '__main__':
     # In case this is being run by a wandb 

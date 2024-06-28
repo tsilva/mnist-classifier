@@ -1,0 +1,12 @@
+data_loader:
+  batch_size: 64
+model:
+  id: AdvancedCNN
+optimizer:
+  id: Adam
+  params:
+    lr: 0.01
+loss_function:
+  id: CrossEntropyLoss
+lr_scheduler:
+  id: ReduceLROnPlateau
