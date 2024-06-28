@@ -1,13 +1,15 @@
-# MNIST Classifier
+# MNIST-like Classifier
 
-This project implements a Convolutional Neural Network (CNN) classifier for the MNIST dataset using PyTorch. It includes features for training, evaluation, and hyperparameter tuning using Weights & Biases (wandb) for experiment tracking.
+This project implements a Convolutional Neural Network (CNN) classifier for MNIST-like datasets using PyTorch. It includes features for training, evaluation, and hyperparameter tuning using Weights & Biases (wandb) for experiment tracking.
 
 ## Table of Contents
 
 - [Features](#features)
+- [Datasets](#datasets)
 - [Installation](#installation)
 - [Usage](#usage)
 - [Models](#models)
+- [Benchmarks](#benchmarks)
 - [Configuration](#configuration)
 - [Logging and Visualization](#logging-and-visualization)
 - [License](#license)
@@ -15,6 +17,7 @@ This project implements a Convolutional Neural Network (CNN) classifier for the 
 ## Features
 
 - Implementation of multiple CNN architectures (LeNet5, SimpleCNN, AdvancedCNN)
+- Support for various MNIST-like datasets (MNIST, FashionMNIST, EMNIST, KMNIST, QMNIST)
 - Training with customizable hyperparameters
 - Evaluation on test set
 - Hyperparameter tuning using wandb sweeps
@@ -22,6 +25,18 @@ This project implements a Convolutional Neural Network (CNN) classifier for the 
 - Visualization of confusion matrices and misclassified images
 - Support for custom weight initialization
 - Learning rate scheduling
+
+## Datasets
+
+The project supports the following datasets:
+
+- **MNIST**: Handwritten digit recognition dataset
+- **FashionMNIST**: Fashion product recognition dataset
+- **EMNIST**: Extended MNIST dataset with letters and digits
+- **KMNIST**: Kuzushiji-MNIST dataset (Japanese characters)
+- **QMNIST**: QMNIST dataset (MNIST alternative with better quality)
+
+To use a specific dataset, specify it in the configuration file or as a command-line argument.
 
 ## Installation
 
@@ -71,7 +86,7 @@ The script can be run in three modes: train, eval, and sweep.
 To train a model:
 
 ```
-python main.py train --hyperparams_path configs/hyperparams/LeNet5.yml --n_epochs 50
+python main.py train --hyperparams_path configs/hyperparams/LeNet5.yml --n_epochs 50 --dataset MNIST
 ```
 
 ### Evaluation
@@ -79,13 +94,13 @@ python main.py train --hyperparams_path configs/hyperparams/LeNet5.yml --n_epoch
 To evaluate a trained model:
 
 ```
-python main.py eval --model_path outputs/best_model.pth
+python main.py eval --model_path outputs/best_model.pth --dataset FashionMNIST
 ```
 
 Or reference the URL of the Weights & Biases run:
 
 ```
-python main.py eval --model_path https://wandb.ai/username/project/runs/run_id
+python main.py eval --model_path https://wandb.ai/username/project/runs/run_id --dataset EMNIST-letters
 ```
 
 ### Hyperparameter Tuning
@@ -93,7 +108,7 @@ python main.py eval --model_path https://wandb.ai/username/project/runs/run_id
 To create hyperparameter sweep:
 
 ```
-python main.py sweep
+python main.py sweep --dataset KMNIST
 ```
 
 Then start the sweep agent:
@@ -110,12 +125,16 @@ The project includes three CNN architectures:
 2. **SimpleCNN**: A basic CNN with 2 convolutional layers and 2 fully connected layers.
 3. **AdvancedCNN**: A more complex CNN with 4 convolutional layers, 4 fully connected layers, batch normalization, and dropout.
 
-Here are the test set accuracies achieved by each model (includes some third-party models for comparison):
+## Benchmarks
 
-1. **ResNet18 (torchvision, pretrained)**: 99.4% test set accuracy
-2. **LeNet5**: 98.54% test set accuracy
-3. **Simple CNN**: 99.65% test set accuracy
-4. **Advanced CNN**: 99.65% test set accuracy
+The following table shows the test set accuracy achieved for each model on each dataset:
+
+| Model                              | MNIST   | FashionMNIST |
+|------------------------------------|---------|--------------|
+| ResNet18 (torchvision, pretrained) | 99.4%   | N/A          |
+| LeNet5                             | 98.54%  | N/A          |
+| Simple CNN                         | 99.65%  | N/A          |
+| Advanced CNN                       | 99.65%  | N/A          |
 
 ## Configuration
 
@@ -125,6 +144,7 @@ Example configuration (LeNet5.yml):
 
 ```yaml
 data_loader:
+  dataset: "MNIST"
   batch_size: 64
 
 model:

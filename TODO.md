@@ -1,7 +1,6 @@
 # TODO
 
 - [ ] Add data augmentation support (configurable in hyperparams)
-- [ ] Add support for FashionMNIST dataset
 - [ ] Add support for saving model as ONNX
 - [ ] Add support for visualizing model activation maps
 - [ ] Add support for checkpointing during training and resuming from checkpoints

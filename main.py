@@ -486,7 +486,7 @@ def build_loss_function(loss_function_config):
 """
 Create data loaders for the training, validation, and test sets.
 """
-def create_data_loaders(batch_size=64, validation_split=0.2):
+def create_data_loaders(dataset="MNIST", batch_size=64, validation_split=0.2):
     # Define transformations for training data with augmentation
     train_transform = transforms.Compose([
         transforms.ToTensor(),
@@ -499,9 +499,25 @@ def create_data_loaders(batch_size=64, validation_split=0.2):
         transforms.Normalize((0.5,), (0.5,))
     ])
 
-    # Load datasets
-    full_train_dataset = torchvision.datasets.MNIST(root='./data', train=True, download=True, transform=train_transform)
-    test_dataset = torchvision.datasets.MNIST(root='./data', train=False, download=True, transform=test_transform)
+    # Load the specified dataset
+    if dataset == "MNIST":
+        full_train_dataset = torchvision.datasets.MNIST(root='./data', train=True, download=True, transform=train_transform)
+        test_dataset = torchvision.datasets.MNIST(root='./data', train=False, download=True, transform=test_transform)
+    elif dataset == "FashionMNIST":
+        full_train_dataset = torchvision.datasets.FashionMNIST(root='./data', train=True, download=True, transform=train_transform)
+        test_dataset = torchvision.datasets.FashionMNIST(root='./data', train=False, download=True, transform=test_transform)
+    elif dataset.startswith("EMNIST"):
+        split = dataset.split('-')[1] if '-' in dataset else 'balanced'
+        full_train_dataset = torchvision.datasets.EMNIST(root='./data', split=split, train=True, download=True, transform=train_transform)
+        test_dataset = torchvision.datasets.EMNIST(root='./data', split=split, train=False, download=True, transform=test_transform)
+    elif dataset == "KMNIST":
+        full_train_dataset = torchvision.datasets.KMNIST(root='./data', train=True, download=True, transform=train_transform)
+        test_dataset = torchvision.datasets.KMNIST(root='./data', train=False, download=True, transform=test_transform)
+    elif dataset == "QMNIST":
+        full_train_dataset = torchvision.datasets.QMNIST(root='./data', train=True, download=True, transform=train_transform)
+        test_dataset = torchvision.datasets.QMNIST(root='./data', train=False, download=True, transform=test_transform)
+    else:
+        raise ValueError(f"Unsupported dataset: {dataset}")
 
     # Split the full training dataset into training and validation sets
     train_size = int((1 - validation_split) * len(full_train_dataset))
@@ -777,6 +793,8 @@ def _evaluate(
 Perform a hyperparameter sweep using W&B.
 """
 def sweep(seeds=[42]):        
+    data_loader_config = config['data_loader']
+
     # Perform training within the context of the sweep
     with wandb.init():
         # Merge selected sweep params with config
@@ -790,8 +808,7 @@ def sweep(seeds=[42]):
         best_validation_accuracies = []
         for seed in seeds:
             set_seed(seed)
-            batch_size = config['data_loader']['batch_size']
-            data_loaders = create_data_loaders(batch_size=batch_size)
+            data_loaders = create_data_loaders(**data_loader_config)
             best_validation_accuracy, _ = _train(config, data_loaders, n_epochs)
             best_validation_accuracies.append(best_validation_accuracy)
         best_validation_accuracy = np.mean(best_validation_accuracies)
@@ -811,11 +828,12 @@ def main():
     # Parse command line arguments
     parser = argparse.ArgumentParser(description='Train, evaluate, or tune a CNN on MNIST dataset.')
     parser.add_argument('mode', choices=['train', 'eval', 'sweep'], help='Mode to run the script in')
+    parser.add_argument("--dataset", type=str, default="MNIST", help='Dataset to use for training and evaluation')
     parser.add_argument("--seed", type=int, default=42, help="Random seeds to use for training")
-    parser.add_argument('--n_epochs', type=int, default=50, help='Number of epochs to train the model for')
-    parser.add_argument('--hyperparams_path', type=str, default="configs/hyperparams/LeNet5.yml", help='Path to the hyperparameters file')
-    parser.add_argument('--model_path', type=str, default="outputs/best_model.pth", help='Path to the model file for evaluation')
-    parser.add_argument('--model_output_dir', type=str, default="outputs", help='Directory to save the model file')
+    parser.add_argument("--n_epochs", type=int, default=50, help='Number of epochs to train the model for')
+    parser.add_argument("--hyperparams_path", type=str, default="configs/hyperparams/LeNet5.yml", help='Path to the hyperparameters file')
+    parser.add_argument("--model_path", type=str, default="outputs/best_model.pth", help='Path to the model file for evaluation')
+    parser.add_argument("--model_output_dir", type=str, default="outputs", help='Directory to save the model file')
     args = parser.parse_args()
 
     # Set the random seed for reproducibility
@@ -823,8 +841,12 @@ def main():
 
     # Create data loaders
     config = load_config(args.hyperparams_path)
-    batch_size = config['data_loader']['batch_size']
-    data_loaders = create_data_loaders(batch_size=batch_size)
+    data_loader_config = config['data_loader']
+    create_data_loaders_kwargs = {
+        **data_loader_config, 
+        "dataset": data_loader_config.get("dataset", args.dataset) # Use command-line dataset if none was specified in the config file
+    }
+    data_loaders = create_data_loaders(**create_data_loaders_kwargs)
 
     # Train the model
     if args.mode == 'train': train(config, data_loaders, args.n_epochs, args.model_output_dir)
