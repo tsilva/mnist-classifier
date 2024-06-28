@@ -19,8 +19,25 @@ from sklearn.metrics import confusion_matrix, precision_score, recall_score, f1_
 import seaborn as sns
 import matplotlib.pyplot as plt
 import torch.nn.functional as F
+from PIL import Image
 
 PROJECT_NAME = 'mnist-classifier'
+
+DEFAULT_CONFIG = {
+    "logging" : {
+        "image_interval": 5,
+    },
+    "data_loader": {
+        "batch_size": 64
+    },
+    "optimizer" : {
+        "id": "Adam"
+    },
+    "loss_function": {
+        "id": "CrossEntropyLoss"
+    }
+}
+
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # Setup logger
@@ -35,11 +52,28 @@ if str(DEVICE) == "cpu":
     logging.warning("CUDA is not available. Running on CPU. Press Enter to continue...")
     input()
 
+# Make sure W&B is terminated even if the script crashes
 def cleanup():
     if wandb.run: wandb.finish()
 atexit.register(cleanup)
 
+"""
+Set a seed in the random number generators for reproducibility.
+"""
+def set_seed(seed):
+    random.seed(seed) # Set the seed for the random number generator
+    np.random.seed(seed) # Set the seed for NumPy
+    torch.manual_seed(seed) # Set the seed for PyTorch
+    torch.cuda.manual_seed(seed) # Set the seed for CUDA
+    torch.cuda.manual_seed_all(seed) # Set the seed for all CUDA devices
+    torch.backends.cudnn.deterministic = True # Ensure deterministic results (WARNING: can slow down training!)
+    torch.backends.cudnn.benchmark = False # Disable cuDNN benchmarking (WARNING: can slow down training!)
+
+"""
+Initialize weights using the specified initialization mode.
+"""
 def init_model_weights(model, mode):
+    # He initialization
     if mode == 'he':
         for m in model.modules():
             if isinstance(m, nn.Conv2d):
@@ -49,6 +83,10 @@ def init_model_weights(model, mode):
                 if m.bias is not None:
                     nn.init.constant_(m.bias, 0)
 
+"""
+Load a model from the specified path.
+If the path is the URL for a W&B run, download associated model artifact.
+"""
 def load_model(model_path):
     if model_path.startswith('https://wandb.ai/'):
         with wandb.init(project=PROJECT_NAME):
@@ -68,38 +106,46 @@ def load_model(model_path):
     else: raise ValueError(f"Unsupported model file format: {model_path}")
     return model
     
+"""
+Returns the default configuration merged with the specified hyperparameters.
+"""
 def load_config(hyperparams_path=None):
+    # Load hyperparameters from the specified file (if provided)
     hyperparams = {}
-
     if hyperparams_path:
         with open(hyperparams_path, 'r') as file:
             hyperparams = yaml.safe_load(file)
 
+    # Merge the hyperparameters with the default configuration
     return {
-        "logging" : {
-            "image_interval": 5,
-        },
-        "data_loader": {
-            "batch_size": 64
-        },
-        "optimizer" : {
-            "id": "Adam"
-        },
-        "loss_function": {
-            "id": "CrossEntropyLoss"
-        },
+        **DEFAULT_CONFIG,
         **hyperparams
     }
 
-def set_seed(seed):
-    random.seed(seed)  
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
+"""
+Parse the sweep configuration from W&B to a dictionary.
+Mapping dependent parameters from the flattened structure of the sweep config to the nested structure of our config.
+"""
+def parse_wandb_sweep_config(sweep_config):
+    config = {}
+    for key, value in sweep_config.items():
+        if key == "method": continue
 
+        if isinstance(value, dict) and "id" in value:
+            _id = value["id"]
+            _id_l = _id.lower()
+            params = {k.replace(f"{_id_l}_", ""): v for k, v in value.items() if k.startswith(_id_l)}
+            value = {"id": _id, "params": params}
+        
+        config[key] = value
+    return config
+
+"""
+LeNet-5 model:
+- 2 convolutional layers
+- 3 fully connected layers
+- Tanh activation functions
+"""
 class LeNet5(nn.Module):
     def __init__(self, conv1_filters=6, conv2_filters=16, conv3_filters=120, fc1_neurons=84, fc2_neurons=10, weight_init=None):
         super(LeNet5, self).__init__()
@@ -153,6 +199,12 @@ class LeNet5(nn.Module):
         # Return the output
         return x  # Shape: (batch_size, fc2_neurons)
 
+"""
+Simple CNN model with:
+- 2 convolutional layers
+- 2 fully connected layers
+- ReLU activation functions
+"""
 class SimpleCNN(nn.Module):
     def __init__(self, conv1_filters=32, conv2_filters=64, fc1_neurons=1000, fc2_neurons=10, weight_init=None):
         super(SimpleCNN, self).__init__()
@@ -199,6 +251,14 @@ class SimpleCNN(nn.Module):
         # Return the output
         return x # Shape: (batch_size, fc2_neurons)
 
+"""
+Advanced CNN model with:
+- 4 convolutional layers
+- 4 fully connected layers
+- ReLU activation functions
+- Batch normalization
+- Dropout
+"""
 class AdvancedCNN(nn.Module):
     def __init__(self, weight_init=None):
         super(AdvancedCNN, self).__init__()
@@ -242,6 +302,9 @@ class AdvancedCNN(nn.Module):
         init_model_weights(self, weight_init)
         
     def _forward_features(self, x):
+        return x
+
+    def forward(self, x):
         x = F.relu(self.conv1_bn(self.conv1(x)))
         x = self.conv2_bn(self.conv2(x))
         x = F.relu(x)
@@ -255,10 +318,7 @@ class AdvancedCNN(nn.Module):
         x = self.dropout(x)
         
         x = torch.flatten(x, 1)
-        return x
 
-    def forward(self, x):
-        x = self._forward_features(x)
         x = F.relu(self.fc1_bn(self.fc1(x)))
         x = self.dropout(x)  # Dropout after first FC layer
         x = F.relu(self.fc2_bn(self.fc2(x)))
@@ -266,8 +326,12 @@ class AdvancedCNN(nn.Module):
         x = F.relu(self.fc3_bn(self.fc3(x)))
         x = self.dropout(x)  # Dropout after third FC layer
         x = self.fc4(x)
+
         return F.log_softmax(x, dim=1)
 
+"""
+Factory method to build a model based on the specified configuration.
+"""
 def build_model(model_config, model_state=None):
     model_id = model_config['id']
     model_params = model_config.get('params', {})
@@ -280,6 +344,9 @@ def build_model(model_config, model_state=None):
     model = model.to(DEVICE)
     return model
 
+"""
+Factory method to build an optimizer based on the specified configuration.
+"""
 def build_optimizer(model, optimizer_config):
     optimizer_id = optimizer_config['id']
     optimizer_params = optimizer_config.get('params', {})
@@ -289,6 +356,9 @@ def build_optimizer(model, optimizer_config):
     }[optimizer_id](model.parameters(), **optimizer_params)
     return optimizer
 
+"""
+Factory method to build a learning rate scheduler based on the specified configuration.
+"""
 def build_lr_scheduler(optimizer, scheduler_config):
     if not scheduler_config: return None
     scheduler_id = scheduler_config['id']
@@ -299,6 +369,9 @@ def build_lr_scheduler(optimizer, scheduler_config):
     }[scheduler_id](optimizer, **scheduler_params)
     return scheduler
 
+"""
+Factory method to build a loss function based on the specified configuration.
+"""
 def build_loss_function(loss_function_config):
     loss_function_id = loss_function_config['id']
     loss_function_params = loss_function_config.get('params', {})
@@ -307,6 +380,9 @@ def build_loss_function(loss_function_config):
     }[loss_function_id](**loss_function_params)
     return loss_function
 
+"""
+Create data loaders for the training, validation, and test sets.
+"""
 def create_data_loaders(batch_size=64, validation_split=0.2):
     # Define transformations for training data with augmentation
     train_transform = transforms.Compose([
@@ -434,6 +510,10 @@ def _train(config, data_loaders, n_epochs):
         "last_epoch": epoch
     }
 
+"""
+Train the model for the specified number of epochs.
+Logs the training progress and results to W&B.
+"""
 def train(config, data_loaders, n_epochs, model_output_dir): 
     # Perform training within the context of a W&B run
     model_config = config['model']
@@ -459,7 +539,12 @@ def train(config, data_loaders, n_epochs, model_output_dir):
         run.log_artifact(artifact)
 
         # Evaluate the best model on the test set
-        eval_results = _evaluate(best_model, data_loaders, "test", log_confusion_matrix=True, log_misclassifications=True)
+        eval_results = _evaluate(
+            best_model, data_loaders, "test", 
+            log_confusion_matrix=True, 
+            log_misclassifications=True, 
+            log_activation_maps=True
+        )
         wandb.log(eval_results)
 
         # Return training result
@@ -469,15 +554,25 @@ def train(config, data_loaders, n_epochs, model_output_dir):
             **eval_results
         }
 
-def evaluate(model, data_loaders, loader_type):
+"""
+Evaluates the model on the specified test set.
+Logs the evaluation results to W&B.
+"""
+def evaluate(model, data_loaders):
     date_s = time.strftime('%Y%m%dT%H%M%S')
     run_id = f"evaluate__{date_s}"
     with wandb.init(project=PROJECT_NAME, id=run_id): 
-        metrics = _evaluate(model, data_loaders, loader_type)
+        metrics = _evaluate(model, data_loaders, "test")
         wandb.log(metrics)
         return metrics
 
-def _evaluate(model, data_loaders, loader_type, log_confusion_matrix=False, log_misclassifications=False):
+def _evaluate(
+    model, 
+    data_loaders, 
+    loader_type, 
+    log_confusion_matrix=False, 
+    log_misclassifications=False
+):
     # Load the model if a path was provided
     if isinstance(model, str): model = load_model(model)
     
@@ -488,7 +583,6 @@ def _evaluate(model, data_loaders, loader_type, log_confusion_matrix=False, log_
     model.eval()
 
     # Define the loss function
-    # TODO: use data from w&b
     criterion = nn.CrossEntropyLoss()
 
     correct = total = running_loss = 0
@@ -572,29 +666,18 @@ def _evaluate(model, data_loaders, loader_type, log_confusion_matrix=False, log_
             misclassified_images.append(wandb.Image(plt))
             plt.close()
         metrics[f"{loader_type}_misclassified_images"] = misclassified_images
-    
+
     # Return metrics
     return metrics
 
+"""
+Perform a hyperparameter sweep using W&B.
+"""
 def sweep(seeds=[42]):        
-    def _parse_sweep_config(sweep_config):
-        config = {}
-        for key, value in sweep_config.items():
-            if key == "method": continue
-
-            if isinstance(value, dict) and "id" in value:
-                _id = value["id"]
-                _id_l = _id.lower()
-                params = {k.replace(f"{_id_l}_", ""): v for k, v in value.items() if k.startswith(_id_l)}
-                value = {"id": _id, "params": params}
-            
-            config[key] = value
-        return config
-
     # Perform training within the context of the sweep
     with wandb.init():
         # Merge selected sweep params with config
-        sweep_config = _parse_sweep_config(wandb.config)
+        sweep_config = parse_wandb_sweep_config(wandb.config)
         default_config = load_config()
         config = {**default_config, **sweep_config}
 
@@ -617,12 +700,16 @@ def sweep(seeds=[42]):
         # Log the score to be maximized by the sweep
         wandb.log({"score": score})
 
+"""
+Main function to parse command line arguments and run the script.
+Runs by default when script is not being executed by a W&B sweep agent.
+"""
 def main():
     # Parse command line arguments
     parser = argparse.ArgumentParser(description='Train, evaluate, or tune a CNN on MNIST dataset.')
     parser.add_argument('mode', choices=['train', 'eval', 'sweep'], help='Mode to run the script in')
     parser.add_argument("--seed", type=int, default=42, help="Random seeds to use for training")
-    parser.add_argument('--n_epochs', type=int, default=50, help='Number of epochs to train the model for') # TODO: move to hyperparams
+    parser.add_argument('--n_epochs', type=int, default=50, help='Number of epochs to train the model for')
     parser.add_argument('--hyperparams_path', type=str, default="configs/hyperparams/LeNet5.yml", help='Path to the hyperparameters file')
     parser.add_argument('--model_path', type=str, default="outputs/best_model.pth", help='Path to the model file for evaluation')
     parser.add_argument('--model_output_dir', type=str, default="outputs", help='Directory to save the model file')
