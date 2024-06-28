@@ -1,28 +1,30 @@
-import sys
-import yaml
-from tqdm import tqdm
-import time
-import random
 import argparse
-import torch
 import atexit
-import multiprocessing
 import logging
+import multiprocessing
+import os
+import random
+import sys
+import time
+
+import matplotlib.pyplot as plt
+import numpy as np
+import seaborn as sns
+from sklearn.metrics import confusion_matrix, f1_score, precision_score, recall_score
+import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 import torchvision
 import torchvision.transforms as transforms
 from torch.utils.data import DataLoader, random_split
-import numpy as np
+from tqdm import tqdm
 import wandb
-from sklearn.metrics import confusion_matrix, precision_score, recall_score, f1_score
-import seaborn as sns
-import matplotlib.pyplot as plt
-import torch.nn.functional as F
-from PIL import Image
+import yaml
 
 PROJECT_NAME = 'mnist-classifier'
 
+# Define the default configuration for the model
 DEFAULT_CONFIG = {
     "logging" : {
         "image_interval": 5,
@@ -38,16 +40,16 @@ DEFAULT_CONFIG = {
     }
 }
 
+# Retrieve the device to run the models on
+# (use HW acceleration if available, otherwise use CPU)
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # Setup logger
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# Indicate the device being used
-logger.info(f"Using device: {DEVICE}")
-
 # Make sure the user is aware if HW acceleration is not available
+logger.info(f"Using device: {DEVICE}")
 if str(DEVICE) == "cpu":
     logging.warning("CUDA is not available. Running on CPU. Press Enter to continue...")
     input()
@@ -89,17 +91,16 @@ If the path is the URL for a W&B run, download associated model artifact.
 """
 def load_model(model_path):
     if model_path.startswith('https://wandb.ai/'):
-        with wandb.init(project=PROJECT_NAME):
-            url_tokens = model_path.split('/')
-            entity_id = url_tokens[3]
-            project_name = url_tokens[4]
-            run_id = url_tokens[6]
-            model_file_name = f"best_model_{run_id}.pth"
-            artifact_path = f"{entity_id}/{project_name}/{model_file_name}:latest"
-            logging.info(f"Downloading model artifact: {artifact_path}")
-            artifact = wandb.use_artifact(artifact_path, type='model')
-            artifact_dir = artifact.download()
-            model_path = f"{artifact_dir}/{model_file_name}"
+        url_tokens = model_path.split('/')
+        entity_id = url_tokens[3]
+        project_name = url_tokens[4]
+        run_id = url_tokens[6]
+        model_file_name = f"best_model_{run_id}.pth"
+        artifact_path = f"{entity_id}/{project_name}/{model_file_name}:latest"
+        logging.info(f"Downloading model artifact: {artifact_path}")
+        artifact = wandb.use_artifact(artifact_path, type='model')
+        artifact_dir = artifact.download()
+        model_path = f"{artifact_dir}/{model_file_name}"
     
     if model_path.endswith('.pth'): model = torch.load(model_path)
     elif model_path.endswith('.onnx'): model = torch.onnx.load(model_path)
@@ -144,10 +145,19 @@ def parse_wandb_sweep_config(sweep_config):
 LeNet-5 model:
 - 2 convolutional layers
 - 3 fully connected layers
-- Tanh activation functions
+- Average pooling (legacy reasons from the original paper, max pooling would be better)
+- Tanh activation functions (legacy reasons from the original paper, ReLU would be better)
 """
 class LeNet5(nn.Module):
-    def __init__(self, conv1_filters=6, conv2_filters=16, conv3_filters=120, fc1_neurons=84, fc2_neurons=10, weight_init=None):
+    def __init__(
+        self, 
+        conv1_filters=6, 
+        conv2_filters=16, 
+        conv3_filters=120, 
+        fc1_neurons=84, 
+        fc2_neurons=10, 
+        weight_init=None
+    ):
         super(LeNet5, self).__init__()
 
         # Store the hyperparameters
@@ -157,53 +167,81 @@ class LeNet5(nn.Module):
         self.fc1_neurons = fc1_neurons
         self.fc2_neurons = fc2_neurons
 
-        # Encoder block
+        # Encodes the input into higher-dimensional representations
         self.encoder = nn.Sequential(
-            nn.Conv2d(1, conv1_filters, kernel_size=5, stride=1, padding=2),  # Input shape: (batch_size, 1, 28, 28)
-            nn.Tanh(),  # Tanh activation
-            nn.AvgPool2d(kernel_size=2, stride=2),  # Output shape: (batch_size, conv1_filters, 14, 14)
+            # Input shape: (batch_size, 1, 28, 28)
+            # Kernel size: 5x5, Stride: 1, Padding: 2
+            # Output shape: (batch_size, conv1_filters, 28, 28)
+            nn.Conv2d(1, conv1_filters, kernel_size=5, stride=1, padding=2),
+            nn.Tanh(), 
+            
+            # Input shape: (batch_size, conv1_filters, 28, 28)
+            # Kernel size: 2x2, Stride: 2
+            # Output shape: (batch_size, conv1_filters, 14, 14)
+            nn.AvgPool2d(kernel_size=2, stride=2),
 
-            nn.Conv2d(conv1_filters, conv2_filters, kernel_size=5, stride=1),  # Input shape: (batch_size, conv1_filters, 14, 14)
-            nn.Tanh(),  # Tanh activation
-            nn.AvgPool2d(kernel_size=2, stride=2)  # Output shape: (batch_size, conv2_filters, 5, 5)
+            # Input shape: (batch_size, conv1_filters, 14, 14)
+            # Kernel size: 5x5, Stride: 1, Padding: 0
+            # Output shape: (batch_size, conv2_filters, 10, 10)
+            nn.Conv2d(conv1_filters, conv2_filters, kernel_size=5, stride=1),
+            nn.Tanh(),
+
+            # Input shape: (batch_size, conv2_filters, 10, 10)
+            # Kernel size: 2x2, Stride: 2
+            # Output shape: (batch_size, conv2_filters, 5, 5)
+            nn.AvgPool2d(kernel_size=2, stride=2),
+            
+            # Input shape: (batch_size, conv2_filters, 5, 5)
+            # Kernel size: 5x5, Stride: 1, Padding: 0
+            # Output shape: (batch_size, conv3_filters, 1, 1)
+            nn.Conv2d(conv2_filters, conv3_filters, kernel_size=5, stride=1),
+            nn.Tanh()
         )
 
-        # Third Convolutional Layer to match LeNet-5
-        self.conv3 = nn.Conv2d(conv2_filters, conv3_filters, kernel_size=5, stride=1)  # Input shape: (batch_size, conv2_filters, 5, 5)
-        
-        # Classifier block
+        # Classifies the encoded input into output classes
         self.classifier = nn.Sequential(
-            nn.Tanh(),  # Tanh activation after conv3
+            # Input shape: (batch_size, conv3_filters)
+            # Output shape: (batch_size, fc1_neurons)
+            nn.Linear(conv3_filters, fc1_neurons),
 
-            nn.Linear(conv3_filters, fc1_neurons),  # Input shape: (batch_size, conv3_filters)
-            nn.Tanh(),  # Tanh activation
+            # Tanh activation
+            nn.Tanh(),
 
-            nn.Linear(fc1_neurons, fc2_neurons)  # Input shape: (batch_size, fc1_neurons)
+            # Input shape: (batch_size, fc1_neurons)
+            # Output shape: (batch_size, fc2_neurons)
+            nn.Linear(fc1_neurons, fc2_neurons)
         )
 
+        # Conditional custom weight initialization
         init_model_weights(self, weight_init)
 
     def forward(self, x):
         # Pass through the encoder
-        x = self.encoder(x)  # Shape: (batch_size, conv2_filters, 5, 5)
-        
-        # Pass through the third convolutional layer
-        x = self.conv3(x)  # Shape: (batch_size, conv3_filters, 1, 1)
+        # Input shape: (batch_size, 1, 28, 28)
+        # Output shape: (batch_size, conv3_filters, 1, 1)
+        x = self.encoder(x)
         
         # Flatten the output for the classifier
-        x = x.view(-1, self.conv3_filters)  # Shape: (batch_size, conv3_filters)
+        # Input shape: (batch_size, conv3_filters, 1, 1)
+        # Output shape: (batch_size, conv3_filters)
+        # x = x.view(-1, self.conv3_filters)
+        # x = torch.flatten(x, 1)
+        x = x.view(x.size(0), -1)
         
         # Pass through the classifier
-        x = self.classifier(x)  # Shape: (batch_size, fc2_neurons)
+        # Input shape: (batch_size, conv3_filters)
+        # Output shape: (batch_size, fc2_neurons)
+        x = self.classifier(x)
         
-        # Return the output
-        return x  # Shape: (batch_size, fc2_neurons)
+        # Return output with shape (batch_size, fc2_neurons)
+        return x
 
 """
 Simple CNN model with:
 - 2 convolutional layers
 - 2 fully connected layers
 - ReLU activation functions
+- Max pooling
 """
 class SimpleCNN(nn.Module):
     def __init__(self, conv1_filters=32, conv2_filters=64, fc1_neurons=1000, fc2_neurons=10, weight_init=None):
@@ -229,10 +267,14 @@ class SimpleCNN(nn.Module):
 
         self.classifier = nn.Sequential(
             # First fully connected layer
+            # Input shape: (batch_size, conv2_filters * 6 * 6)
+            # Output shape: (batch_size, fc1_neurons)
             nn.Linear(conv2_filters * 6 * 6, fc1_neurons),
             nn.ReLU(),
 
-            # Output layer
+            # Second fully connected layer
+            # Input shape: (batch_size, fc1_neurons)
+            # Output shape: (batch_size, fc2_neurons)
             nn.Linear(fc1_neurons, fc2_neurons)
         )
 
@@ -255,90 +297,151 @@ class SimpleCNN(nn.Module):
 Advanced CNN model with:
 - 4 convolutional layers
 - 4 fully connected layers
-- ReLU activation functions
 - Batch normalization
+- ReLU activation functions
+- Max pooling
 - Dropout
 """
 class AdvancedCNN(nn.Module):
     def __init__(self, weight_init=None):
         super(AdvancedCNN, self).__init__()
         
-        # Layer 1
-        self.conv1 = nn.Conv2d(in_channels=1, out_channels=32, kernel_size=5, stride=1, padding=2)
-        self.conv1_bn = nn.BatchNorm2d(32)
-        
-        # Layer 2
-        self.conv2 = nn.Conv2d(in_channels=32, out_channels=32, kernel_size=5, stride=1, padding=2, bias=False)
-        self.conv2_bn = nn.BatchNorm2d(32)
-        
-        # Layer 3
-        self.conv3 = nn.Conv2d(in_channels=32, out_channels=64, kernel_size=3, stride=1, padding=1)
-        self.conv3_bn = nn.BatchNorm2d(64)
-        
-        # Layer 4
-        self.conv4 = nn.Conv2d(in_channels=64, out_channels=64, kernel_size=3, stride=1, padding=1, bias=False)
-        self.conv4_bn = nn.BatchNorm2d(64)
-        
-        # Dropout layer
-        self.dropout = nn.Dropout(0.5)
+        # Encode input into higher-dimensional representations
+        self.encoder = nn.Sequential(
+            # First convolutional layer (feature extraction)
+            # Input shape: (batch_size, 1, 28, 28)
+            # Kernel size: 5x5, Stride: 1, Padding: 2
+            # Output shape: (batch_size, 32, 28, 28)
+            nn.Conv2d(in_channels=1, out_channels=32, kernel_size=5, stride=1, padding=2),
+            nn.BatchNorm2d(32),
+            nn.ReLU(inplace=True),
 
+            # Second convolutional layer (feature extraction)
+            # Input shape: (batch_size, 32, 28, 28)
+            # Kernel size: 5x5, Stride: 1, Padding: 2
+            # Output shape: (batch_size, 32, 28, 28)
+            nn.Conv2d(in_channels=32, out_channels=32, kernel_size=5, stride=1, padding=2, bias=False),
+            nn.BatchNorm2d(32),
+            nn.ReLU(inplace=True),
+
+            # Max pooling layer (downsampling)
+            # Input shape: (batch_size, 32, 28, 28)
+            # Kernel size: 2x2, Stride: 2
+            # Output shape: (batch_size, 32, 14, 14)
+            nn.MaxPool2d(kernel_size=2, stride=2),
+
+            # Dropout layer (regularization)
+            # (randomly zeroes some of the elements of the input tensor 
+            # with probability in order to prevent overfitting)
+            nn.Dropout(0.5),
+
+            # Third convolutional layer (feature extraction)
+            # Input shape: (batch_size, 32, 14, 14)
+            # Kernel size: 3x3, Stride: 1, Padding: 1
+            # Output shape: (batch_size, 64, 14, 14)
+            nn.Conv2d(in_channels=32, out_channels=64, kernel_size=3, stride=1, padding=1),
+            nn.BatchNorm2d(64),
+            nn.ReLU(inplace=True),
+
+            # Fourth convolutional layer (feature extraction)
+            # Input shape: (batch_size, 64, 14, 14)
+            # Kernel size: 3x3, Stride: 1, Padding: 1
+            # Output shape: (batch_size, 64, 14, 14)
+            nn.Conv2d(in_channels=64, out_channels=64, kernel_size=3, stride=1, padding=1, bias=False),
+            nn.BatchNorm2d(64),
+            nn.ReLU(inplace=True),
+
+            # Max pooling layer (downsampling)
+            # Input shape: (batch_size, 64, 14, 14)
+            # Kernel size: 2x2, Stride: 2
+            # Output shape: (batch_size, 64, 7, 7)
+            nn.MaxPool2d(kernel_size=2, stride=2),
+
+            # Dropout layer (regularization)
+            nn.Dropout(0.5)
+        )
+        
         # Calculate the flattened size after the last pooling layer
+        # (needed to determine the input size for the first fully connected layer;
+        # this approach allows us to more easily change the encoder architecture
+        # without having to manually calculate the flattened size based on the changes)
         dummy_input = torch.randn(1, 1, 28, 28)
-        dummy_output = self._forward_features(dummy_input)
+        dummy_output = self.encoder(dummy_input)
+        dummy_output = torch.flatten(dummy_output, 1)
         flattened_size = dummy_output.numel()
 
-        # Fully connected layers
-        self.fc1 = nn.Linear(flattened_size, 256, bias=False)
-        self.fc1_bn = nn.BatchNorm1d(256)
-        
-        self.fc2 = nn.Linear(256, 128, bias=False)
-        self.fc2_bn = nn.BatchNorm1d(128)
-        
-        self.fc3 = nn.Linear(128, 84, bias=False)
-        self.fc3_bn = nn.BatchNorm1d(84)
-        
-        self.fc4 = nn.Linear(84, 10)
+        # Classification layers
+        self.classifier = nn.Sequential(
+            # First fully connected layer (classification)
+            # Input shape: (batch_size, flattened_size)
+            # Output shape: (batch_size, 256)
+            nn.Linear(flattened_size, 256, bias=False),
+            nn.BatchNorm1d(256),
+            nn.ReLU(inplace=True),
 
+            # Dropout layer (regularization)
+            nn.Dropout(0.5),
+            
+            # Second fully connected layer (classification)
+            # Input shape: (batch_size, 256)
+            # Output shape: (batch_size, 128)
+            nn.Linear(256, 128, bias=False),
+            nn.BatchNorm1d(128),
+            nn.ReLU(inplace=True),
+
+            # Dropout layer (regularization)
+            nn.Dropout(0.5),
+            
+            # Third fully connected layer (classification)
+            # Input shape: (batch_size, 128)
+            # Output shape: (batch_size, 84)
+            nn.Linear(128, 84, bias=False),
+            nn.BatchNorm1d(84),
+            nn.ReLU(inplace=True),
+
+            # Dropout layer (regularization)
+            nn.Dropout(0.5),
+
+            # Output layer (final classification)
+            nn.Linear(84, 10)
+        )
+
+        # Conditional custom weight initialization
         init_model_weights(self, weight_init)
-        
-    def _forward_features(self, x):
-        return x
 
     def forward(self, x):
-        x = F.relu(self.conv1_bn(self.conv1(x)))
-        x = self.conv2_bn(self.conv2(x))
-        x = F.relu(x)
-        x = F.max_pool2d(x, kernel_size=2, stride=2)
-        x = self.dropout(x)
-        
-        x = F.relu(self.conv3_bn(self.conv3(x)))
-        x = self.conv4_bn(self.conv4(x))
-        x = F.relu(x)
-        x = F.max_pool2d(x, kernel_size=2, stride=2)
-        x = self.dropout(x)
-        
+        # Encode input into higher-dimensional representations
+        x = self.encoder(x)
+
+        # Flatten the input into 1D tensor that can be fed into the classifier
         x = torch.flatten(x, 1)
 
-        x = F.relu(self.fc1_bn(self.fc1(x)))
-        x = self.dropout(x)  # Dropout after first FC layer
-        x = F.relu(self.fc2_bn(self.fc2(x)))
-        x = self.dropout(x)  # Dropout after second FC layer
-        x = F.relu(self.fc3_bn(self.fc3(x)))
-        x = self.dropout(x)  # Dropout after third FC layer
-        x = self.fc4(x)
+        # Classify encoded input into output classes
+        x = self.classifier(x)
 
-        return F.log_softmax(x, dim=1)
+        # Convert the output to log probabilities
+        #x = F.log_softmax(x, dim=1)
+
+        # Return the classification probabilities
+        return x
 
 """
 Factory method to build a model based on the specified configuration.
 """
 def build_model(model_config, model_state=None):
+    def _create_torchvision_resnet18(**kwargs):
+        model = torchvision.models.resnet18(**kwargs)
+        model.conv1 = nn.Conv2d(1, 64, kernel_size=7, stride=2, padding=3, bias=False)
+        model.fc = nn.Linear(512, 10)
+        return model
+
     model_id = model_config['id']
     model_params = model_config.get('params', {})
     model = {
         "SimpleCNN": SimpleCNN,
         "LeNet5": LeNet5,
-        "AdvancedCNN": AdvancedCNN
+        "AdvancedCNN": AdvancedCNN,
+        "TorchvisionPretrainedResNet18" : lambda **kwargs: _create_torchvision_resnet18(**kwargs)
     }[model_id](**model_params)
     if model_state: model.load_state_dict(model_state)
     model = model.to(DEVICE)
@@ -527,6 +630,7 @@ def train(config, data_loaders, n_epochs, model_output_dir):
 
         # Save the best model to disk
         best_model = build_model(model_config, model_state=best_model_state)
+        if not os.path.exists(model_output_dir): os.makedirs(model_output_dir)
         best_model_path = f"{model_output_dir}/best_model_{run_id}.pth"
         torch.save(best_model, best_model_path)
         
@@ -542,8 +646,7 @@ def train(config, data_loaders, n_epochs, model_output_dir):
         eval_results = _evaluate(
             best_model, data_loaders, "test", 
             log_confusion_matrix=True, 
-            log_misclassifications=True, 
-            log_activation_maps=True
+            log_misclassifications=True
         )
         wandb.log(eval_results)
 
@@ -558,11 +661,11 @@ def train(config, data_loaders, n_epochs, model_output_dir):
 Evaluates the model on the specified test set.
 Logs the evaluation results to W&B.
 """
-def evaluate(model, data_loaders):
+def evaluate(model, data_loaders, loader_type):
     date_s = time.strftime('%Y%m%dT%H%M%S')
     run_id = f"evaluate__{date_s}"
     with wandb.init(project=PROJECT_NAME, id=run_id): 
-        metrics = _evaluate(model, data_loaders, "test")
+        metrics = _evaluate(model, data_loaders, loader_type)
         wandb.log(metrics)
         return metrics
 
