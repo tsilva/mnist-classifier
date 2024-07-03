@@ -1,28 +1,36 @@
 import argparse
 import atexit
 import logging
-import multiprocessing
 import os
 import random
 import sys
 import time
 
+import albumentations as A
+from albumentations.pytorch import ToTensorV2
 import matplotlib.pyplot as plt
 import numpy as np
 import seaborn as sns
 from sklearn.metrics import confusion_matrix, f1_score, precision_score, recall_score
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 import torch.optim as optim
 import torchvision
 import torchvision.transforms as transforms
-from torch.utils.data import DataLoader, random_split
+from torch.utils.data import DataLoader, TensorDataset, random_split
 from tqdm import tqdm
 import wandb
 import yaml
 
 PROJECT_NAME = 'mnist-classifier'
+
+# The supported datasets
+DATASETS = {
+    "MNIST": torchvision.datasets.MNIST,
+    "KMNIST": torchvision.datasets.KMNIST,
+    "QMNIST": torchvision.datasets.QMNIST,
+    "FashionMNIST": torchvision.datasets.FashionMNIST
+}
 
 # Define the default configuration for the model
 DEFAULT_CONFIG = {
@@ -39,6 +47,7 @@ DEFAULT_CONFIG = {
         "id": "CrossEntropyLoss"
     }
 }
+
 
 # Retrieve the device to run the models on
 # (use HW acceleration if available, otherwise use CPU)
@@ -58,6 +67,18 @@ if str(DEVICE) == "cpu":
 def cleanup():
     if wandb.run: wandb.finish()
 atexit.register(cleanup)
+
+"""
+Converts an Albumentations transform to a torchvision transform.
+"""
+class AlbumentationsToTorchvision:
+    def __init__(self, albumentations_transform):
+        self.albumentations_transform = albumentations_transform
+
+    def __call__(self, img):
+        img = np.array(img)
+        transformed = self.albumentations_transform(image=img)
+        return transformed['image']
 
 """
 Set a seed in the random number generators for reproducibility.
@@ -142,13 +163,14 @@ def parse_wandb_sweep_config(sweep_config):
     return config
 
 """
-LeNet-5 model:
+LeNet-5 original model:
+
 - 2 convolutional layers
 - 3 fully connected layers
 - Average pooling (legacy reasons from the original paper, max pooling would be better)
 - Tanh activation functions (legacy reasons from the original paper, ReLU would be better)
 """
-class LeNet5(nn.Module):
+class LeNet5Original(nn.Module):
     def __init__(
         self, 
         conv1_filters=6, 
@@ -158,7 +180,7 @@ class LeNet5(nn.Module):
         fc2_neurons=10, 
         weight_init=None
     ):
-        super(LeNet5, self).__init__()
+        super(LeNet5Original, self).__init__()
 
         # Store the hyperparameters
         self.conv1_filters = conv1_filters
@@ -237,212 +259,126 @@ class LeNet5(nn.Module):
         return x
 
 """
-Simple CNN model with:
-- 2 convolutional layers
+LeNet-5 model with improvements (based on Kaggle entry `https://www.kaggle.com/code/cdeotte/25-million-images-0-99757-mnist`):
+
+- 6 convolutional layers
 - 2 fully connected layers
+- Batch normalization
+- Dropout
 - ReLU activation functions
-- Max pooling
 """
-class SimpleCNN(nn.Module):
-    def __init__(self, conv1_filters=32, conv2_filters=64, fc1_neurons=1000, fc2_neurons=10, weight_init=None):
-        super(SimpleCNN, self).__init__()
+class LeNet5Improved(nn.Module):
+    def __init__(self, weight_init=None):
+        super(LeNet5Improved, self).__init__()
         
+        # Encodes the input into higher-dimensional representations
         self.encoder = nn.Sequential(
             # First convolutional layer
             # Input shape: (batch_size, 1, 28, 28)
             # Kernel size: 3x3, Stride: 1, Padding: 1
-            # Output shape: (batch_size, conv1_filters, 28, 28)
-            nn.Conv2d(1, conv1_filters, kernel_size=3, padding=1),
+            # Output shape: (batch_size, 32, 28, 28)
+            nn.Conv2d(in_channels=1, out_channels=32, kernel_size=3, padding=1),
             nn.ReLU(),
-            nn.MaxPool2d(kernel_size=2, stride=2), # Shape: (batch_size, conv1_filters, 14, 14)
 
             # Second convolutional layer
-            # Input shape: (batch_size, conv1_filters, 14, 14)
-            # Kernel size: 3x3, Stride: 1, Padding: 0 (default)
-            # Output shape: (batch_size, conv2_filters, 12, 12)
-            nn.Conv2d(conv1_filters, conv2_filters, kernel_size=3),
+            # Input shape: (batch_size, 32, 28, 28)
+            # Kernel size: 3x3, Stride: 1, Padding: 1
+            # Output shape: (batch_size, 32, 28, 28)
+            nn.Conv2d(in_channels=32, out_channels=32, kernel_size=3, padding=1),
             nn.ReLU(),
-            nn.MaxPool2d(kernel_size=2, stride=2) # Shape: (batch_size, conv2_filters, 6, 6)
-        )
+            nn.BatchNorm2d(32),
+            
+            # Third convolutional layer
+            # Input shape: (batch_size, 32, 28, 28)
+            # Kernel size: 3x3, Stride: 2, Padding: 1
+            # Output shape: (batch_size, 64, 14, 14) 
+            nn.Conv2d(in_channels=32, out_channels=64, kernel_size=3, padding=1, stride=2),
+            nn.ReLU(),
 
+            # Fourth convolutional layer
+            # Input shape: (batch_size, 64, 14, 14)
+            # Kernel size: 3x3, Stride: 1, Padding: 1
+            # Output shape: (batch_size, 64, 14, 14)
+            nn.Conv2d(in_channels=64, out_channels=64, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.BatchNorm2d(64),
+
+            # Fifth convolutional layer
+            # Input shape: (batch_size, 64, 14, 14)
+            # Kernel size: 3x3, Stride: 2, Padding: 1
+            # Output shape: (batch_size, 128, 7, 7)
+            nn.Conv2d(in_channels=64, out_channels=128, kernel_size=3, padding=1, stride=2),
+            nn.ReLU(),
+
+            # Sixth convolutional layer
+            # Input shape: (batch_size, 128, 7, 7)
+            # Kernel size: 3x3, Stride: 1, Padding: 1
+            # Output shape: (batch_size, 128, 7, 7)
+            nn.Conv2d(in_channels=128, out_channels=128, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.BatchNorm2d(128)
+        )
+        
+        # Classifies the encoded input into output classes
         self.classifier = nn.Sequential(
             # First fully connected layer
-            # Input shape: (batch_size, conv2_filters * 6 * 6)
-            # Output shape: (batch_size, fc1_neurons)
-            nn.Linear(conv2_filters * 6 * 6, fc1_neurons),
+            # Input shape: (batch_size, 128*7*7)
+            # Output shape: (batch_size, 256)
+            nn.Linear(128*7*7, 256),
             nn.ReLU(),
+            
+            # Dropout layer
+            nn.Dropout(p=0.5),
 
             # Second fully connected layer
-            # Input shape: (batch_size, fc1_neurons)
-            # Output shape: (batch_size, fc2_neurons)
-            nn.Linear(fc1_neurons, fc2_neurons)
-        )
-
-        init_model_weights(self, weight_init)
-
-    def forward(self, x):
-        # Encode input using convolutional layers
-        x = self.encoder(x) 
-        
-        # Flatten the output for the fully connected layers
-        x = x.view(x.size(0), -1) # Shape: (batch_size, conv2_filters * 6 * 6)
-        
-        # Classify encoded input using fully connected layers
-        x = self.classifier(x)
-        
-        # Return the output
-        return x # Shape: (batch_size, fc2_neurons)
-
-"""
-Advanced CNN model with:
-- 4 convolutional layers
-- 4 fully connected layers
-- Batch normalization
-- ReLU activation functions
-- Max pooling
-- Dropout
-"""
-class AdvancedCNN(nn.Module):
-    def __init__(self, weight_init=None):
-        super(AdvancedCNN, self).__init__()
-        
-        # Encode input into higher-dimensional representations
-        self.encoder = nn.Sequential(
-            # First convolutional layer (feature extraction)
-            # Input shape: (batch_size, 1, 28, 28)
-            # Kernel size: 5x5, Stride: 1, Padding: 2
-            # Output shape: (batch_size, 32, 28, 28)
-            nn.Conv2d(in_channels=1, out_channels=32, kernel_size=5, stride=1, padding=2),
-            nn.BatchNorm2d(32),
-            nn.ReLU(inplace=True),
-
-            # Second convolutional layer (feature extraction)
-            # Input shape: (batch_size, 32, 28, 28)
-            # Kernel size: 5x5, Stride: 1, Padding: 2
-            # Output shape: (batch_size, 32, 28, 28)
-            nn.Conv2d(in_channels=32, out_channels=32, kernel_size=5, stride=1, padding=2, bias=False),
-            nn.BatchNorm2d(32),
-            nn.ReLU(inplace=True),
-
-            # Max pooling layer (downsampling)
-            # Input shape: (batch_size, 32, 28, 28)
-            # Kernel size: 2x2, Stride: 2
-            # Output shape: (batch_size, 32, 14, 14)
-            nn.MaxPool2d(kernel_size=2, stride=2),
-
-            # Dropout layer (regularization)
-            # (randomly zeroes some of the elements of the input tensor 
-            # with probability in order to prevent overfitting)
-            nn.Dropout(0.5),
-
-            # Third convolutional layer (feature extraction)
-            # Input shape: (batch_size, 32, 14, 14)
-            # Kernel size: 3x3, Stride: 1, Padding: 1
-            # Output shape: (batch_size, 64, 14, 14)
-            nn.Conv2d(in_channels=32, out_channels=64, kernel_size=3, stride=1, padding=1),
-            nn.BatchNorm2d(64),
-            nn.ReLU(inplace=True),
-
-            # Fourth convolutional layer (feature extraction)
-            # Input shape: (batch_size, 64, 14, 14)
-            # Kernel size: 3x3, Stride: 1, Padding: 1
-            # Output shape: (batch_size, 64, 14, 14)
-            nn.Conv2d(in_channels=64, out_channels=64, kernel_size=3, stride=1, padding=1, bias=False),
-            nn.BatchNorm2d(64),
-            nn.ReLU(inplace=True),
-
-            # Max pooling layer (downsampling)
-            # Input shape: (batch_size, 64, 14, 14)
-            # Kernel size: 2x2, Stride: 2
-            # Output shape: (batch_size, 64, 7, 7)
-            nn.MaxPool2d(kernel_size=2, stride=2),
-
-            # Dropout layer (regularization)
-            nn.Dropout(0.5)
-        )
-        
-        # Calculate the flattened size after the last pooling layer
-        # (needed to determine the input size for the first fully connected layer;
-        # this approach allows us to more easily change the encoder architecture
-        # without having to manually calculate the flattened size based on the changes)
-        dummy_input = torch.randn(1, 1, 28, 28)
-        dummy_output = self.encoder(dummy_input)
-        dummy_output = torch.flatten(dummy_output, 1)
-        flattened_size = dummy_output.numel()
-
-        # Classification layers
-        self.classifier = nn.Sequential(
-            # First fully connected layer (classification)
-            # Input shape: (batch_size, flattened_size)
-            # Output shape: (batch_size, 256)
-            nn.Linear(flattened_size, 256, bias=False),
-            nn.BatchNorm1d(256),
-            nn.ReLU(inplace=True),
-
-            # Dropout layer (regularization)
-            nn.Dropout(0.5),
-            
-            # Second fully connected layer (classification)
-            # Input shape: (batch_size, 256)
-            # Output shape: (batch_size, 128)
-            nn.Linear(256, 128, bias=False),
-            nn.BatchNorm1d(128),
-            nn.ReLU(inplace=True),
-
-            # Dropout layer (regularization)
-            nn.Dropout(0.5),
-            
-            # Third fully connected layer (classification)
-            # Input shape: (batch_size, 128)
-            # Output shape: (batch_size, 84)
-            nn.Linear(128, 84, bias=False),
-            nn.BatchNorm1d(84),
-            nn.ReLU(inplace=True),
-
-            # Dropout layer (regularization)
-            nn.Dropout(0.5),
-
-            # Output layer (final classification)
-            nn.Linear(84, 10)
+            nn.Linear(256, 10)
         )
 
         # Conditional custom weight initialization
         init_model_weights(self, weight_init)
-
+    
     def forward(self, x):
-        # Encode input into higher-dimensional representations
+        # Pass through the encoder
+        # Input shape: (batch_size, 1, 28, 28)
+        # Output shape: (batch_size, 128, 7, 7)
         x = self.encoder(x)
 
-        # Flatten the input into 1D tensor that can be fed into the classifier
-        x = torch.flatten(x, 1)
+        # Flatten the output for the classifier
+        x = x.view(x.size(0), -1)
 
-        # Classify encoded input into output classes
+        # Pass through the classifier
+        # Input shape: (batch_size, 128*7*7)
+        # Output shape: (batch_size, 10)
         x = self.classifier(x)
 
-        # Convert the output to log probabilities
-        #x = F.log_softmax(x, dim=1)
-
-        # Return the classification probabilities
+        # Return output with shape (batch_size, 10)
         return x
-
+    
+"""
+Ensemble model that averages the predictions of multiple models.
+"""
+class EnsembleModel(nn.Module): 
+    def __init__(self, model_constructor, model_params, n_models):
+        super(EnsembleModel, self).__init__()
+        self.models = nn.ModuleList([model_constructor(**model_params) for _ in range(n_models)])
+    
+    def forward(self, x):
+        outputs = [model(x) for model in self.models]
+        return torch.stack(outputs).mean(0)
+    
 """
 Factory method to build a model based on the specified configuration.
 """
 def build_model(model_config, model_state=None):
-    def _create_torchvision_resnet18(**kwargs):
-        model = torchvision.models.resnet18(**kwargs)
-        model.conv1 = nn.Conv2d(1, 64, kernel_size=7, stride=2, padding=3, bias=False)
-        model.fc = nn.Linear(512, 10)
-        return model
-
     model_id = model_config['id']
+    n_models = model_config.get('n_models', 1)
     model_params = model_config.get('params', {})
-    model = {
-        "SimpleCNN": SimpleCNN,
-        "LeNet5": LeNet5,
-        "AdvancedCNN": AdvancedCNN,
-        "TorchvisionPretrainedResNet18" : lambda **kwargs: _create_torchvision_resnet18(**kwargs)
-    }[model_id](**model_params)
+    model_constructor = {
+        "LeNet5Original": LeNet5Original,
+        "LeNet5Improved": LeNet5Improved
+    }[model_id]
+    if n_models > 1: model = EnsembleModel(model_constructor, model_params, n_models)
+    else: model = model_constructor(**model_params)
     if model_state: model.load_state_dict(model_state)
     model = model.to(DEVICE)
     return model
@@ -455,6 +391,7 @@ def build_optimizer(model, optimizer_config):
     optimizer_params = optimizer_config.get('params', {})
     optimizer = {
         "Adam": optim.Adam,
+        "AdamW": optim.AdamW,
         "SGD": optim.SGD
     }[optimizer_id](model.parameters(), **optimizer_params)
     return optimizer
@@ -468,7 +405,9 @@ def build_lr_scheduler(optimizer, scheduler_config):
     scheduler_params = scheduler_config.get('params', {})
     scheduler = {
         "StepLR": optim.lr_scheduler.StepLR,
-        "ReduceLROnPlateau": optim.lr_scheduler.ReduceLROnPlateau
+        "ReduceLROnPlateau": optim.lr_scheduler.ReduceLROnPlateau,
+        "CosineAnnealingLR": optim.lr_scheduler.CosineAnnealingLR,
+        "OneCycleLR": optim.lr_scheduler.OneCycleLR
     }[scheduler_id](optimizer, **scheduler_params)
     return scheduler
 
@@ -483,55 +422,97 @@ def build_loss_function(loss_function_config):
     }[loss_function_id](**loss_function_params)
     return loss_function
 
-"""
-Create data loaders for the training, validation, and test sets.
-"""
-def create_data_loaders(dataset="MNIST", batch_size=64, validation_split=0.2):
-    # Define transformations for training data with augmentation
-    train_transform = transforms.Compose([
-        transforms.ToTensor(),
-        transforms.Normalize((0.5,), (0.5,))
-    ])
+def calculate_mean_std(dataset):
+    loader = DataLoader(dataset)
+    data = next(iter(loader))[0]
+    mean = data.mean().item()
+    std = data.std().item()
+    return mean, std
 
-    # Define transformations for validation and test data (no augmentation)
-    test_transform = transforms.Compose([
-        transforms.ToTensor(),
-        transforms.Normalize((0.5,), (0.5,))
-    ])
+def augment_dataset(original_dataset, default_transform, augment_transform, n_new_images):
+    augmented_images = []
+    augmented_labels = []
+    
+    with tqdm(total=n_new_images, desc="Augmenting data") as pbar:
+        while len(augmented_images) < n_new_images:
+            for img, label in original_dataset:
+                if len(augmented_images) >= n_new_images:
+                    break
+                img = augment_transform(img)
+                augmented_images.append(img)
+                augmented_labels.append(label)
+                pbar.update(1)  # Update progress bar by 1 for each image
 
-    # Load the specified dataset
-    if dataset == "MNIST":
-        full_train_dataset = torchvision.datasets.MNIST(root='./data', train=True, download=True, transform=train_transform)
-        test_dataset = torchvision.datasets.MNIST(root='./data', train=False, download=True, transform=test_transform)
-    elif dataset == "FashionMNIST":
-        full_train_dataset = torchvision.datasets.FashionMNIST(root='./data', train=True, download=True, transform=train_transform)
-        test_dataset = torchvision.datasets.FashionMNIST(root='./data', train=False, download=True, transform=test_transform)
-    elif dataset.startswith("EMNIST"):
-        split = dataset.split('-')[1] if '-' in dataset else 'balanced'
-        full_train_dataset = torchvision.datasets.EMNIST(root='./data', split=split, train=True, download=True, transform=train_transform)
-        test_dataset = torchvision.datasets.EMNIST(root='./data', split=split, train=False, download=True, transform=test_transform)
-    elif dataset == "KMNIST":
-        full_train_dataset = torchvision.datasets.KMNIST(root='./data', train=True, download=True, transform=train_transform)
-        test_dataset = torchvision.datasets.KMNIST(root='./data', train=False, download=True, transform=test_transform)
-    elif dataset == "QMNIST":
-        full_train_dataset = torchvision.datasets.QMNIST(root='./data', train=True, download=True, transform=train_transform)
-        test_dataset = torchvision.datasets.QMNIST(root='./data', train=False, download=True, transform=test_transform)
+    augmented_images = torch.stack(augmented_images)
+    augmented_labels = torch.tensor(augmented_labels)
+    
+    original_images, original_labels = [], []
+    for img, label in original_dataset:
+        original_images.append(default_transform(img))
+        original_labels.append(label)
+
+    original_images = torch.stack(original_images)
+    original_labels = torch.tensor(original_labels)
+
+    final_images = torch.cat((original_images, augmented_images))
+    final_labels = torch.cat((original_labels, augmented_labels))
+
+    augmented_dataset = TensorDataset(final_images, final_labels)
+    
+    return augmented_dataset
+
+def create_data_loaders(dataset="MNIST", batch_size=64, validation_split=0.1):
+    # Load the full dataset without transformations to calculate the overall mean and standard deviation
+    # (we will use this information to normalize the inputs as to improve training performance)
+    plain_train = DATASETS[dataset](root='./data', train=True, download=True, transform=transforms.ToTensor())
+    plain_test = DATASETS[dataset](root='./data', train=False, download=True, transform=transforms.ToTensor())
+    combined_data = torch.utils.data.ConcatDataset([plain_train, plain_test])
+    overall_mean, overall_std = calculate_mean_std(combined_data)
+    logging.info(f'Overall Mean: {overall_mean}, Overall Std: {overall_std}')
+    
+    # Split the training dataset into training and validation sets
+    full_train_dataset = DATASETS[dataset](root='./data', train=True, download=True)
+    test_dataset = DATASETS[dataset](root='./data', train=False, download=True)
+    if validation_split > 0:
+        train_size = int((1 - validation_split) * len(full_train_dataset))
+        validation_size = len(full_train_dataset) - train_size
+        train_dataset, validation_dataset = random_split(full_train_dataset, [train_size, validation_size])
+    # If no validation split is specified, use the test set as the validation set
     else:
-        raise ValueError(f"Unsupported dataset: {dataset}")
+        train_dataset = full_train_dataset
+        validation_dataset = test_dataset
+    
+    # Apply the default transformation to the datasets
+    # (normalize the inputs using the overall mean and standard deviation)
+    default_transform = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize((overall_mean,), (overall_std,))
+    ])
+    validation_dataset.transform = default_transform
+    test_dataset.transform = default_transform
 
-    # Split the full training dataset into training and validation sets
-    train_size = int((1 - validation_split) * len(full_train_dataset))
-    validation_size = len(full_train_dataset) - train_size
-    train_dataset, validation_dataset = random_split(full_train_dataset, [train_size, validation_size])
+    # TODO: softcode data augmentation pipeline
+    # Augment the train dataset
+    augment_transform = AlbumentationsToTorchvision(
+        A.Compose([
+            A.Rotate(limit=30),
+            A.RandomResizedCrop(height=28, width=28, scale=(0.8, 1.0)),
+            A.GridDistortion(num_steps=5, distort_limit=0.3, p=0.5),
+            A.CoarseDropout(max_holes=1, max_height=10, max_width=10, p=0.5),
+            A.Normalize(mean=(overall_mean,), std=(overall_std,)),
+            ToTensorV2()
+        ])
+    )
+    train_dataset.transform = augment_transform
 
-    # Setup the data loaders
-    num_workers = multiprocessing.cpu_count()
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=True)
-    validation_loader = DataLoader(validation_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=True)
-    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=True)
-    data_loaders = {'train': train_loader, 'validation': validation_loader, 'test': test_loader}
+    # Create the data loaders
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True) # TODO: faster without got half the performance if I increased num_workers and/or set pin_memory=True (find reason why)
+    validation_loader = DataLoader(validation_dataset, batch_size=batch_size, shuffle=False)
+    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
 
-    return data_loaders
+    # Return the data loaders
+    return {'train': train_loader, 'validation': validation_loader, 'test': test_loader}
+
 
 def _train(config, data_loaders, n_epochs):
     # Retrieve hyperparameters from the config
@@ -565,9 +546,15 @@ def _train(config, data_loaders, n_epochs):
         total = 0
         all_labels = []
         all_predictions = []
+
+        num_batch_loads = 0
+        batch_load_start = time.time()
+        total_batch_load_time = 0
         for images, labels in train_loader:
             images, labels = images.to(DEVICE), labels.to(DEVICE)
-            
+            num_batch_loads += 1
+            total_batch_load_time += time.time() - batch_load_start
+
             # Perform forward pass
             predictions = model(images)
 
@@ -589,27 +576,35 @@ def _train(config, data_loaders, n_epochs):
             all_labels.extend(labels.cpu().numpy())
             all_predictions.extend(predicted.cpu().numpy())
 
+            # Reset the batch load timer
+            batch_load_start = time.time()
+        
+        # Calculate average batch load time
+        average_batch_load_time = total_batch_load_time / num_batch_loads
+
         # Calculate train loss and accuracy
         train_loss = running_loss / len(train_loader.dataset)
         train_accuracy = 100 * correct / total
 
-        # Evaluate the model on the test set
-        eval_metrics = _evaluate(model, data_loaders, "validation")
-        validation_accuracy = eval_metrics["validation_accuracy"]
-        validation_loss = eval_metrics["validation_loss"]
-        
-        # Update the learning rate based on current validation loss
-        if lr_scheduler: lr_scheduler.step(validation_loss)
+        # Evaluate performance on the validation set
+        validation_metrics = _evaluate(
+            model, data_loaders, "validation", 
+            log_confusion_matrix=epoch % 10 == 0, # TODO: softcode log interval
+            log_misclassifications=epoch % 10 == 0, 
+        )
+        validation_accuracy = validation_metrics["validation/accuracy"]
+        validation_loss = validation_metrics["validation/loss"]
 
         # Create metrics
         metrics = {
-            "epoch": epoch,
-            "train_loss": train_loss,
-            "train_accuracy": train_accuracy,
-            "best_validation_accuracy": best_validation_accuracy,
-            **eval_metrics
+            "train/loss": train_loss,
+            "train/accuracy": train_accuracy,
+            "train/batches/total_load_time": total_batch_load_time,
+            "train/batches/average_load_time": average_batch_load_time,
+            "validation/best_accuracy": best_validation_accuracy,
+            **validation_metrics
         }
-        if lr_scheduler: metrics["learning_rate"] = lr_scheduler.get_last_lr()[0]
+        if lr_scheduler: metrics["train/learning_rate"] = lr_scheduler.get_last_lr()[0]
 
         # Log metrics to W&B
         wandb.log(metrics, step=epoch)
@@ -621,12 +616,15 @@ def _train(config, data_loaders, n_epochs):
             best_model_state = model.state_dict()
             logging.debug(f'Saved best model with accuracy: {best_validation_accuracy:.2f}%')
 
+        # Update the learning rate based on current validation loss
+        if lr_scheduler: lr_scheduler.step(validation_loss)
+
     # Return training results
     return {
-        "best_validation_accuracy": best_validation_accuracy,
-        "best_model_state": best_model_state,
-        "best_epoch": best_epoch,
-        "last_epoch": epoch
+        "train/last_epoch": epoch,
+        "validation/best_accuracy": best_validation_accuracy,
+        "validation/best_epoch": best_epoch,
+        "validation/best_model_state": best_model_state,
     }
 
 """
@@ -642,7 +640,7 @@ def train(config, data_loaders, n_epochs, model_output_dir):
     with wandb.init(project=PROJECT_NAME, id=run_id, config=config) as run:
         # Perform training
         train_results = _train(config, data_loaders, n_epochs)
-        best_model_state = train_results["best_model_state"]
+        best_model_state = train_results["validation/best_model_state"]
 
         # Save the best model to disk
         best_model = build_model(model_config, model_state=best_model_state)
@@ -659,18 +657,17 @@ def train(config, data_loaders, n_epochs, model_output_dir):
         run.log_artifact(artifact)
 
         # Evaluate the best model on the test set
-        eval_results = _evaluate(
+        test_metrics = _evaluate(
             best_model, data_loaders, "test", 
             log_confusion_matrix=True, 
             log_misclassifications=True
         )
-        wandb.log(eval_results)
+        wandb.log(test_metrics)
 
         # Return training result
         return {
             **train_results,
-            "best_model_path": best_model_path,
-            **eval_results
+            "best_model_path": best_model_path
         }
 
 """
@@ -711,9 +708,13 @@ def _evaluate(
     # Evaluate the model
     loader = data_loaders[loader_type]
     with torch.no_grad():  # Disable gradient tracking (no backpropagation needed for evaluation)
+        num_batch_loads = 0
+        batch_load_start = time.time()
+        total_batch_load_time = 0
         for images, labels in loader:
-            # Move images and labels to the device for inference
-            images, labels = images.to(DEVICE), labels.to(DEVICE)
+            images, labels = images.to(DEVICE), labels.to(DEVICE) # Move images and labels to the device for inference
+            num_batch_loads += 1
+            total_batch_load_time += time.time() - batch_load_start
 
             # Perform forward pass
             predictions = model(images)
@@ -739,6 +740,12 @@ def _evaluate(
                 if lbl != pred
             ])
 
+            # Reset the batch load timer
+            batch_load_start = time.time()
+
+    # Calculate average batch load time
+    average_batch_load_time = total_batch_load_time / num_batch_loads
+    
     # Extract all labels and predictions
     all_labels, all_predictions = zip(*[(lbl.item(), pred.item()) for _, lbl, pred in all_data])
 
@@ -756,11 +763,13 @@ def _evaluate(
 
     # Initialize evaluation metrics to be returned to the caller
     metrics = {
-        f"{loader_type}_accuracy": accuracy,
-        f"{loader_type}_loss": average_loss,
-        f"{loader_type}_precision": precision,
-        f"{loader_type}_recall": recall,
-        f"{loader_type}_f1": f1
+        f"{loader_type}/batches/total_load_time": total_batch_load_time,
+        f"{loader_type}/batches/average_load_time": average_batch_load_time,
+        f"{loader_type}/accuracy": accuracy,
+        f"{loader_type}/loss": average_loss,
+        f"{loader_type}/precision": precision,
+        f"{loader_type}/recall": recall,
+        f"{loader_type}/f1": f1
     }
 
     # Log confusion matrix
@@ -772,7 +781,7 @@ def _evaluate(
         plt.ylabel('True')
         confusion_matrix_image = wandb.Image(plt)
         plt.close()
-        metrics[f"{loader_type}_confusion_matrix"] = confusion_matrix_image
+        metrics[f"{loader_type}/confusion_matrix"] = confusion_matrix_image
 
     # Log misclassifications
     if log_misclassifications:
@@ -784,7 +793,7 @@ def _evaluate(
             plt.axis('off')
             misclassified_images.append(wandb.Image(plt))
             plt.close()
-        metrics[f"{loader_type}_misclassified_images"] = misclassified_images
+        metrics[f"{loader_type}/misclassified"] = misclassified_images
 
     # Return metrics
     return metrics
@@ -830,7 +839,7 @@ def main():
     parser.add_argument('mode', choices=['train', 'eval', 'sweep'], help='Mode to run the script in')
     parser.add_argument("--dataset", type=str, default="MNIST", help='Dataset to use for training and evaluation')
     parser.add_argument("--seed", type=int, default=42, help="Random seeds to use for training")
-    parser.add_argument("--n_epochs", type=int, default=50, help='Number of epochs to train the model for')
+    parser.add_argument("--n_epochs", type=int, default=200, help='Number of epochs to train the model for')
     parser.add_argument("--hyperparams_path", type=str, default="configs/hyperparams/LeNet5.yml", help='Path to the hyperparameters file')
     parser.add_argument("--model_path", type=str, default="outputs/best_model.pth", help='Path to the model file for evaluation')
     parser.add_argument("--model_output_dir", type=str, default="outputs", help='Directory to save the model file')

@@ -1,6 +1,0 @@
-model:
-  id: TorchvisionPretrainedResNet18
-  params:
-    pretrained: True
-lr_scheduler:
-  id: ReduceLROnPlateau

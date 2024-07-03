@@ -1,0 +1,4 @@
+model:
+  id: LeNet5Improved
+lr_scheduler:
+  id: ReduceLROnPlateau

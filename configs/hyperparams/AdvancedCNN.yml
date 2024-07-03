@@ -1,4 +1,0 @@
-model:
-  id: AdvancedCNN
-lr_scheduler:
-  id: ReduceLROnPlateau
