@@ -499,33 +499,19 @@ class BestCNN(nn.Module):
 
         # Return output with shape (batch_size, 10)
         return x
-    
-"""
-Ensemble model that averages the predictions of multiple models.
-"""
-class EnsembleModel(nn.Module): 
-    def __init__(self, model_constructor, model_params, n_models):
-        super(EnsembleModel, self).__init__()
-        self.models = nn.ModuleList([model_constructor(**model_params) for _ in range(n_models)])
-    
-    def forward(self, x):
-        outputs = [model(x) for model in self.models]
-        return torch.stack(outputs).mean(0)
-    
+        
 """
 Factory method to build a model based on the specified configuration.
 """
 def build_model(model_config, model_state=None):
     model_id = model_config['id']
-    n_models = model_config.get('n_models', 1)
     model_params = model_config.get('params', {})
     model_constructor = {
         "LeNet5Original": LeNet5Original,
         "LeNet5Improved": LeNet5Improved,
         "BestCNN": BestCNN
     }[model_id]
-    if n_models > 1: model = EnsembleModel(model_constructor, model_params, n_models)
-    else: model = model_constructor(**model_params)
+    model = model_constructor(**model_params)
     if model_state: model.load_state_dict(model_state)
     model = model.to(DEVICE)
     return model
@@ -704,7 +690,7 @@ def _train(config, data_loaders, n_epochs):
     best_validation_accuracy = 0.0
     best_model_state = None
     best_epoch = None
-    for epoch in tqdm(range(1, n_epochs + 1), desc="Training model"):
+    for epoch in tqdm(range(1, 3), desc="Training model"):
         # Set the model in training mode
         model.train()
 
@@ -762,6 +748,13 @@ def _train(config, data_loaders, n_epochs):
         validation_accuracy = validation_metrics["validation/accuracy"]
         validation_loss = validation_metrics["validation/loss"]
 
+        # If the model is the best so far, save it to disk
+        if validation_accuracy > best_validation_accuracy:
+            best_validation_accuracy = validation_accuracy
+            best_epoch = epoch
+            best_model_state = model.state_dict()
+            logging.debug(f'Saved best model with accuracy: {best_validation_accuracy:.2f}%')
+
         # Create metrics
         learning_rate = lr_scheduler.get_last_lr()[0] if lr_scheduler else None
         metrics = {
@@ -789,15 +782,9 @@ def _train(config, data_loaders, n_epochs):
                 "validation/best_accuracy" : best_validation_accuracy
             }, indent=4))
 
-        # If the model is the best so far, save it to disk
-        if validation_accuracy > best_validation_accuracy:
-            best_validation_accuracy = validation_accuracy
-            best_epoch = epoch
-            best_model_state = model.state_dict()
-            logging.debug(f'Saved best model with accuracy: {best_validation_accuracy:.2f}%')
-
         # Update the learning rate based on current validation loss
-        if lr_scheduler: lr_scheduler.step(validation_loss)
+        if lr_scheduler: 
+            lr_scheduler.step(validation_loss)
 
         # Check if we should stop early
         if early_stopping(validation_loss):

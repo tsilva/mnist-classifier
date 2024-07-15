@@ -11,8 +11,10 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # Function to load models from a given path
 def load_models(model_path):
-    if os.path.isdir(model_path):  model_files = glob(os.path.join(model_path, "*.pth"))
-    else: model_files = [model_path]
+    if os.path.isdir(model_path):
+        model_files = glob(os.path.join(model_path, "*.pth"))
+    else:
+        model_files = [model_path]
     models = [torch.jit.load(model_file, map_location=device).to(device).eval() for model_file in model_files]
     return models
 
@@ -52,7 +54,7 @@ def main(args):
     # Function to clear the canvas and the image
     def clear_canvas():
         canvas.delete("all")
-        global image, draw
+        nonlocal image, draw
         image = Image.new("L", (canvas_width, canvas_height), color="black")
         draw = ImageDraw.Draw(image)
 
@@ -61,7 +63,7 @@ def main(args):
         # Preprocess the image
         img_resized = image.resize((28, 28))
         img_tensor = transforms.ToTensor()(img_resized)
-        img_normalized = transforms.Normalize((0.1307,), (0.3081,))(img_tensor)
+        img_normalized = transforms.Normalize((0.1376800686120987,), (0.3125477433204651,))(img_tensor)
         
         # Make prediction
         with torch.no_grad():
