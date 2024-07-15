@@ -2,6 +2,7 @@ import argparse
 import atexit
 import logging
 import os
+import json
 import random
 import sys
 import time
@@ -17,7 +18,7 @@ import torch.nn as nn
 import torch.optim as optim
 import torchvision
 import torchvision.transforms as transforms
-from torch.utils.data import DataLoader, TensorDataset, random_split
+from torch.utils.data import Dataset, DataLoader, TensorDataset, random_split
 from tqdm import tqdm
 import wandb
 import yaml
@@ -68,6 +69,33 @@ def cleanup():
     if wandb.run: wandb.finish()
 atexit.register(cleanup)
 
+class EarlyStopping:
+    def __init__(self, patience=5, min_delta=0, verbose=False):
+        self.patience = patience
+        self.min_delta = min_delta
+        self.verbose = verbose
+        self.counter = 0
+        self.best_score = None
+        self.early_stop = False
+        self.val_loss_min = np.Inf
+
+    def __call__(self, val_loss):
+        score = -val_loss
+
+        if self.best_score is None:
+            self.best_score = score
+        elif score < self.best_score + self.min_delta:
+            self.counter += 1
+            if self.verbose:
+                logging.debug(f'EarlyStopping counter: {self.counter} out of {self.patience}')
+            if self.counter >= self.patience:
+                self.early_stop = True
+        else:
+            self.best_score = score
+            self.counter = 0
+
+        return self.early_stop
+
 """
 Converts an Albumentations transform to a torchvision transform.
 """
@@ -79,6 +107,23 @@ class AlbumentationsToTorchvision:
         img = np.array(img)
         transformed = self.albumentations_transform(image=img)
         return transformed['image']
+
+"""
+Wrapper class that applies a transformation to any dataset regardless
+of whether it is a PyTorch dataset or not (eg: a Subset caused by a split).
+"""
+class TransformDataset(Dataset):
+    def __init__(self, dataset, transform=None):
+        self.dataset = dataset
+        self.transform = transform
+
+    def __len__(self):
+        return len(self.dataset)
+
+    def __getitem__(self, idx):
+        img, label = self.dataset[idx]
+        if self.transform: img = self.transform(img)
+        return img, label
 
 """
 Set a seed in the random number generators for reproducibility.
@@ -353,6 +398,107 @@ class LeNet5Improved(nn.Module):
 
         # Return output with shape (batch_size, 10)
         return x
+
+"""
+Best CNN model based on the Kaggle entry `https://www.kaggle.com/code/cdeotte/25-million-images-0-99757-mnist`:
+
+- 7 convolutional layers
+- Different kernel sizes and strides
+- 1 fully connected layer
+- Batch normalization
+- Dropout
+- ReLU activation functions
+"""
+class BestCNN(nn.Module):
+    def __init__(self, weight_init=None):
+        super(BestCNN, self).__init__()
+            
+        # Encodes the input into higher-dimensional representations
+        self.encoder = nn.Sequential(
+            # First convolutional layer
+            # Input shape: (batch_size, 1, 28, 28)
+            # Kernel size: 3x3, Stride: 1, Padding: 0
+            # Output shape: (batch_size, 32, 26, 26)
+            nn.Conv2d(1, 32, kernel_size=3),
+            nn.ReLU(),
+            nn.BatchNorm2d(32),
+
+            # Second convolutional layer
+            # Input shape: (batch_size, 32, 26, 26)
+            # Kernel size: 3x3, Stride: 1, Padding: 0
+            # Output shape: (batch_size, 32, 24, 24)
+            nn.Conv2d(32, 32, kernel_size=3),
+            nn.ReLU(),
+            nn.BatchNorm2d(32),
+
+            # Third convolutional layer
+            # Input shape: (batch_size, 32, 24, 24)
+            # Kernel size: 5x5, Stride: 2, Padding: 2
+            # Output shape: (batch_size, 32, 12, 12)
+            nn.Conv2d(32, 32, kernel_size=5, stride=2, padding=2),
+            nn.ReLU(),
+            nn.BatchNorm2d(32),
+            nn.Dropout(0.4),
+            
+            # Fourth convolutional layer
+            # Input shape: (batch_size, 32, 12, 12)
+            # Kernel size: 3x3, Stride: 1, Padding: 0
+            # Output shape: (batch_size, 64, 10, 10)
+            nn.Conv2d(32, 64, kernel_size=3),
+            nn.ReLU(),
+            nn.BatchNorm2d(64),
+
+            # Fifth convolutional layer
+            # Input shape: (batch_size, 64, 10, 10)
+            # Kernel size: 3x3, Stride: 1, Padding: 0
+            # Output shape: (batch_size, 64, 8, 8)
+            nn.Conv2d(64, 64, kernel_size=3),
+            nn.ReLU(),
+            nn.BatchNorm2d(64),
+
+            # Sixth convolutional layer
+            # Input shape: (batch_size, 64, 8, 8)
+            # Kernel size: 5x5, Stride: 2, Padding: 2
+            # Output shape: (batch_size, 64, 4, 4)
+            nn.Conv2d(64, 64, kernel_size=5, stride=2, padding=2),
+            nn.ReLU(),
+            nn.BatchNorm2d(64),
+            nn.Dropout(0.4),
+            
+            # Seventh convolutional layer
+            # Input shape: (batch_size, 64, 4, 4)
+            # Kernel size: 4x4, Stride: 1, Padding: 0
+            # Output shape: (batch_size, 128, 1, 1)
+            nn.Conv2d(64, 128, kernel_size=4),
+            nn.ReLU(),
+            nn.BatchNorm2d(128),
+            nn.Dropout(0.4)
+        )
+
+        # Classifies the encoded input into output classes
+        self.decoder = nn.Sequential(
+            nn.Linear(128, 10)
+        )
+        
+        # Conditional custom weight initialization
+        init_model_weights(self, weight_init)
+
+    def forward(self, x):
+        # Pass through the encoder
+        # Input shape: (batch_size, 1, 28, 28)
+        # Output shape: (batch_size, 128, 1, 1)
+        x = self.encoder(x)
+
+        # Flatten the output for the classifier
+        x = x.view(x.size(0), -1)
+        
+        # Pass through the classifier
+        # Input shape: (batch_size, 128)
+        # Output shape: (batch_size, 10)
+        x = self.decoder(x)
+
+        # Return output with shape (batch_size, 10)
+        return x
     
 """
 Ensemble model that averages the predictions of multiple models.
@@ -375,7 +521,8 @@ def build_model(model_config, model_state=None):
     model_params = model_config.get('params', {})
     model_constructor = {
         "LeNet5Original": LeNet5Original,
-        "LeNet5Improved": LeNet5Improved
+        "LeNet5Improved": LeNet5Improved,
+        "BestCNN": BestCNN
     }[model_id]
     if n_models > 1: model = EnsembleModel(model_constructor, model_params, n_models)
     else: model = model_constructor(**model_params)
@@ -422,6 +569,14 @@ def build_loss_function(loss_function_config):
     }[loss_function_id](**loss_function_params)
     return loss_function
 
+def build_early_stopping(early_stopping_config):
+    early_stopping_id = early_stopping_config['id']
+    early_stopping_params = early_stopping_config.get('params', {})
+    early_stopping = {
+        "EarlyStopping": EarlyStopping
+    }[early_stopping_id](**early_stopping_params)
+    return early_stopping
+
 def calculate_mean_std(dataset):
     loader = DataLoader(dataset)
     data = next(iter(loader))[0]
@@ -461,7 +616,7 @@ def augment_dataset(original_dataset, default_transform, augment_transform, n_ne
     
     return augmented_dataset
 
-def create_data_loaders(dataset="MNIST", batch_size=64, validation_split=0.1):
+def create_data_loaders(dataset="MNIST", batch_size=64, validation_split=0.0):
     # Load the full dataset without transformations to calculate the overall mean and standard deviation
     # (we will use this information to normalize the inputs as to improve training performance)
     plain_train = DATASETS[dataset](root='./data', train=True, download=True, transform=transforms.ToTensor())
@@ -488,10 +643,7 @@ def create_data_loaders(dataset="MNIST", batch_size=64, validation_split=0.1):
         transforms.ToTensor(),
         transforms.Normalize((overall_mean,), (overall_std,))
     ])
-    validation_dataset.transform = default_transform
-    test_dataset.transform = default_transform
 
-    # TODO: softcode data augmentation pipeline
     # Augment the train dataset
     augment_transform = AlbumentationsToTorchvision(
         A.Compose([
@@ -503,7 +655,11 @@ def create_data_loaders(dataset="MNIST", batch_size=64, validation_split=0.1):
             ToTensorV2()
         ])
     )
-    train_dataset.transform = augment_transform
+
+    # Wrap datasets in the custom TransformDataset class
+    train_dataset = TransformDataset(train_dataset, transform=augment_transform)
+    validation_dataset = TransformDataset(validation_dataset, transform=default_transform)
+    test_dataset = TransformDataset(test_dataset, transform=default_transform)
 
     # Create the data loaders
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True) # TODO: faster without got half the performance if I increased num_workers and/or set pin_memory=True (find reason why)
@@ -520,6 +676,16 @@ def _train(config, data_loaders, n_epochs):
     optimizer_config = config["optimizer"]
     loss_function_config = config["loss_function"]
     lr_scheduler_config = config.get("lr_scheduler")
+    early_stopping_config = config.get("early_stopping", {
+        "id" : "EarlyStopping",
+        "params" : {
+            "patience": 10, 
+            "min_delta": 0.001, 
+            "verbose": True
+        }
+    })
+    logging_config = config.get("logging", {})
+    console_interval = logging_config.get("console_interval", 1)
 
     # Unpack data loaders
     train_loader = data_loaders['train']
@@ -529,6 +695,7 @@ def _train(config, data_loaders, n_epochs):
     optimizer = build_optimizer(model, optimizer_config)
     lr_scheduler = build_lr_scheduler(optimizer, lr_scheduler_config)
     loss_function = build_loss_function(loss_function_config)
+    early_stopping = build_early_stopping(early_stopping_config) 
 
     # Log the model architecture
     wandb.watch(model)
@@ -596,6 +763,7 @@ def _train(config, data_loaders, n_epochs):
         validation_loss = validation_metrics["validation/loss"]
 
         # Create metrics
+        learning_rate = lr_scheduler.get_last_lr()[0] if lr_scheduler else None
         metrics = {
             "train/loss": train_loss,
             "train/accuracy": train_accuracy,
@@ -604,10 +772,22 @@ def _train(config, data_loaders, n_epochs):
             "validation/best_accuracy": best_validation_accuracy,
             **validation_metrics
         }
-        if lr_scheduler: metrics["train/learning_rate"] = lr_scheduler.get_last_lr()[0]
+        if learning_rate: metrics["train/learning_rate"] = learning_rate
 
         # Log metrics to W&B
         wandb.log(metrics, step=epoch)
+
+        # Periodic logging to console
+        if epoch % console_interval == 0:
+            logging.info(json.dumps({
+                "epoch": epoch,
+                "train/loss" : train_loss,
+                "train/accuracy" : train_accuracy,
+                "train/learning_rate" : learning_rate,
+                "validation/loss" : validation_loss,
+                "validation/accuracy" : validation_accuracy,
+                "validation/best_accuracy" : best_validation_accuracy
+            }, indent=4))
 
         # If the model is the best so far, save it to disk
         if validation_accuracy > best_validation_accuracy:
@@ -618,6 +798,12 @@ def _train(config, data_loaders, n_epochs):
 
         # Update the learning rate based on current validation loss
         if lr_scheduler: lr_scheduler.step(validation_loss)
+
+        # Check if we should stop early
+        if early_stopping(validation_loss):
+            logging.info(f"Early stopping triggered at epoch {epoch}")
+            break
+        
 
     # Return training results
     return {
@@ -840,7 +1026,7 @@ def main():
     parser.add_argument("--dataset", type=str, default="MNIST", help='Dataset to use for training and evaluation')
     parser.add_argument("--seed", type=int, default=42, help="Random seeds to use for training")
     parser.add_argument("--n_epochs", type=int, default=200, help='Number of epochs to train the model for')
-    parser.add_argument("--hyperparams_path", type=str, default="configs/hyperparams/LeNet5.yml", help='Path to the hyperparameters file')
+    parser.add_argument("--hyperparams_path", type=str, default="configs/hyperparams/LeNet5Original.yml", help='Path to the hyperparameters file')
     parser.add_argument("--model_path", type=str, default="outputs/best_model.pth", help='Path to the model file for evaluation')
     parser.add_argument("--model_output_dir", type=str, default="outputs", help='Directory to save the model file')
     args = parser.parse_args()

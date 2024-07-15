@@ -1,5 +1,4 @@
 model:
-  id: LeNet5Improved
-  n_models: 15
+  id: BestCNN
 lr_scheduler:
   id: ReduceLROnPlateau
