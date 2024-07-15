@@ -69,6 +69,15 @@ def cleanup():
     if wandb.run: wandb.finish()
 atexit.register(cleanup)
 
+class EnsembleModel(nn.Module):
+    def __init__(self, models):
+        super(EnsembleModel, self).__init__()
+        self.models = nn.ModuleList(models)
+
+    def forward(self, x):
+        outputs = [model(x) for model in self.models]
+        return torch.stack(outputs).mean(dim=0)
+    
 class EarlyStopping:
     def __init__(self, patience=5, min_delta=0, verbose=False):
         self.patience = patience
@@ -172,7 +181,19 @@ def load_model(model_path):
     elif model_path.endswith('.onnx'): model = torch.onnx.load(model_path)
     else: raise ValueError(f"Unsupported model file format: {model_path}")
     return model
+
+def load_ensemble(model_path):
+    if os.path.isdir(model_path):
+        models = []
+        for filename in os.listdir(model_path):
+            if filename.endswith('.pth') or filename.endswith('.onnx'):
+                full_path = os.path.join(model_path, filename)
+                models.append(load_model(full_path))
+    else:
+        models = [load_model(model_path)]
     
+    return EnsembleModel(models)
+
 """
 Returns the default configuration merged with the specified hyperparameters.
 """
@@ -690,7 +711,7 @@ def _train(config, data_loaders, n_epochs):
     best_validation_accuracy = 0.0
     best_model_state = None
     best_epoch = None
-    for epoch in tqdm(range(1, 3), desc="Training model"):
+    for epoch in tqdm(range(1, n_epochs + 1), desc="Training model"):
         # Set the model in training mode
         model.train()
 
@@ -864,7 +885,7 @@ def _evaluate(
     log_misclassifications=False
 ):
     # Load the model if a path was provided
-    if isinstance(model, str): model = load_model(model)
+    if isinstance(model, str): model = load_ensemble(model)
     
     # Ensure the model is on the correct device
     model = model.to(DEVICE)
