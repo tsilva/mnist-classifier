@@ -400,7 +400,7 @@ class LeNet5Improved(nn.Module):
         return x
 
 """
-Best CNN model based on the Kaggle entry `https://www.kaggle.com/code/cdeotte/25-million-images-0-99757-mnist`:
+Better CNN model:
 
 - 7 convolutional layers
 - Different kernel sizes and strides
@@ -832,7 +832,8 @@ def train(config, data_loaders, n_epochs, model_output_dir):
         best_model = build_model(model_config, model_state=best_model_state)
         if not os.path.exists(model_output_dir): os.makedirs(model_output_dir)
         best_model_path = f"{model_output_dir}/best_model_{run_id}.pth"
-        torch.save(best_model, best_model_path)
+        scripted_model = torch.jit.script(best_model)
+        scripted_model.save(best_model_path)
         
         # Upload best model to W&B
         logging.info(f"Uploading model to W&B: {best_model_path}")

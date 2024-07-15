@@ -1,86 +1,91 @@
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
 from torchvision import transforms
 import tkinter as tk
-from PIL import Image, ImageDraw, ImageGrab
-import numpy as np
+from PIL import Image, ImageDraw
+import os
+from glob import glob
+import argparse
 
-# Define the neural network architecture
-class Net(nn.Module):
-    def __init__(self):
-        super(Net, self).__init__()
-        self.conv1 = nn.Conv2d(1, 10, kernel_size=5)
-        self.conv2 = nn.Conv2d(10, 20, kernel_size=5)
-        self.conv2_drop = nn.Dropout2d()
-        self.fc1 = nn.Linear(320, 50)
-        self.fc2 = nn.Linear(50, 10)
+# Set the device
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    def forward(self, x):
-        x = F.relu(F.max_pool2d(self.conv1(x), 2))
-        x = F.relu(F.max_pool2d(self.conv2_drop(self.conv2(x)), 2))
-        x = x.view(-1, 320)
-        x = F.relu(self.fc1(x))
-        x = F.dropout(x, training=self.training)
-        x = self.fc2(x)
-        return F.log_softmax(x, dim=1)
+# Function to load models from a given path
+def load_models(model_path):
+    if os.path.isdir(model_path):  model_files = glob(os.path.join(model_path, "*.pth"))
+    else: model_files = [model_path]
+    models = [torch.jit.load(model_file, map_location=device).to(device).eval() for model_file in model_files]
+    return models
 
-# Load the pre-trained model
-model = Net()
-#model.load_state_dict(torch.load('mnist_cnn.pth'))
-model.eval()
+# Function to make predictions using an ensemble of models
+def ensemble_predict(models, input_tensor):
+    outputs = [model(input_tensor) for model in models]
+    avg_output = sum(outputs) / len(outputs)
+    return avg_output.argmax(dim=1, keepdim=True)
 
-# Create the main window
-root = tk.Tk()
-root.title("MNIST Digit Recognizer")
+def main(args):
+    # Load the models
+    models = load_models(args.model_path)
 
-# Create a canvas for drawing
-canvas = tk.Canvas(root, width=280, height=280, bg="black")
-canvas.pack()
+    # Create the main window
+    root = tk.Tk()
+    root.title("MNIST Digit Recognizer")
 
-# Function to draw on the canvas
-def paint(event):
-    x1, y1 = (event.x - 10), (event.y - 10)
-    x2, y2 = (event.x + 10), (event.y + 10)
-    canvas.create_oval(x1, y1, x2, y2, fill="white", width=0)
+    # Create a canvas for drawing
+    canvas_width, canvas_height = 280, 280
+    canvas = tk.Canvas(root, width=canvas_width, height=canvas_height, bg="black")
+    canvas.pack()
 
-canvas.bind("<B1-Motion>", paint)
+    # Create an image to draw on
+    image = Image.new("L", (canvas_width, canvas_height), color="black")
+    draw = ImageDraw.Draw(image)
 
-# Function to clear the canvas
-def clear_canvas():
-    canvas.delete("all")
+    # Function to draw on the canvas and the image
+    def paint(event):
+        x1, y1 = (event.x - 10), (event.y - 10)
+        x2, y2 = (event.x + 10), (event.y + 10)
+        canvas.create_oval(x1, y1, x2, y2, fill="white", width=0)
+        draw.ellipse([x1, y1, x2, y2], fill="white")
 
-# Function to predict the digit
-def predict_digit():
-    # Get the image from the canvas
-    x = root.winfo_rootx() + canvas.winfo_x()
-    y = root.winfo_rooty() + canvas.winfo_y()
-    x1 = x + canvas.winfo_width()
-    y1 = y + canvas.winfo_height()
-    image = ImageGrab.grab().crop((x, y, x1, y1))
-    
-    # Preprocess the image
-    image = image.resize((28, 28)).convert('L')
-    image = np.array(image)
-    image = 255 - image  # Invert the image colors
-    image = image / 255.0  # Normalize to [0, 1]
-    image = torch.tensor(image, dtype=torch.float32).unsqueeze(0).unsqueeze(0)
-    
-    # Make prediction
-    with torch.no_grad():
-        output = model(image)
-        pred = output.argmax(dim=1, keepdim=True)
-    
-    result_label.config(text=f"Predicted Digit: {pred.item()}")
+    # Bind the paint function to the mouse motion event
+    canvas.bind("<B1-Motion>", paint)
 
-# Create buttons and label
-clear_button = tk.Button(root, text="Clear", command=clear_canvas)
-clear_button.pack()
+    # Function to clear the canvas and the image
+    def clear_canvas():
+        canvas.delete("all")
+        global image, draw
+        image = Image.new("L", (canvas_width, canvas_height), color="black")
+        draw = ImageDraw.Draw(image)
 
-predict_button = tk.Button(root, text="Predict", command=predict_digit)
-predict_button.pack()
+    # Function to predict the digit
+    def predict_digit():
+        # Preprocess the image
+        img_resized = image.resize((28, 28))
+        img_tensor = transforms.ToTensor()(img_resized)
+        img_normalized = transforms.Normalize((0.1307,), (0.3081,))(img_tensor)
+        
+        # Make prediction
+        with torch.no_grad():
+            input_tensor = img_normalized.unsqueeze(0).to(device)
+            pred = ensemble_predict(models, input_tensor)
+        
+        # Update the result label with the predicted digit
+        result_label.config(text=f"Predicted Digit: {pred.item()}")
 
-result_label = tk.Label(root, text="Predicted Digit: ")
-result_label.pack()
+    # Create buttons and label
+    clear_button = tk.Button(root, text="Clear", command=clear_canvas)
+    clear_button.pack()
 
-root.mainloop()
+    predict_button = tk.Button(root, text="Predict", command=predict_digit)
+    predict_button.pack()
+
+    result_label = tk.Label(root, text="Predicted Digit: ")
+    result_label.pack()
+
+    # Run the main loop
+    root.mainloop()
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("model_path", type=str, help="Path to the model or directory containing model files")
+    args = parser.parse_args()
+    main(args)
