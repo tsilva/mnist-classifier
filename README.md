@@ -121,9 +121,9 @@ wandb agent username/project/sweep_id
 
 The project includes three CNN architectures:
 
-1. **LeNet5**: A classic CNN architecture with 2 convolutional layers and 3 fully connected layers.
-2. **SimpleCNN**: A basic CNN with 2 convolutional layers and 2 fully connected layers.
-3. **AdvancedCNN**: A more complex CNN with 4 convolutional layers, 4 fully connected layers, batch normalization, and dropout.
+1. **LeNet5**: Attempts to replicate the original LeNet-5 architecture with 2 convolutional layers and 3 fully connected layers.
+2. **LeNet5Improved**: An improved version of LeNet-5 with 3 convolutional layers, 2 fully connected layers, batch normalization, dropout, max pooling, and ReLU.
+3. **AdvancedCNN**: A more advanced CNN architecture with 7 convolutional layers (more features), with different kernel sizes and strides (different feature scales), 1 fully connected layer (less classification overfitting), batch normalization, dropout, and ReLU.
 
 ## Benchmarks
 
@@ -131,10 +131,10 @@ The following table shows the test set accuracy achieved for each model on each 
 
 | Model                              | MNIST   | FashionMNIST | QMNIST | KMNIST | EMNIST-digits |
 |------------------------------------|---------|--------------| ------ | ------ | ------------- |
-| ResNet18 (torchvision, pretrained) | 99.4%   | N/A          | N/A    | N/A    | N/A           |
-| LeNet5                             | 98.54%  | N/A          | N/A    | N/A    | N/A           |
-| Simple CNN                         | 99.65%  | N/A          | N/A    | N/A    | N/A           |
-| Advanced CNN                       | 99.65%  | N/A          | N/A    | N/A    | N/A           |
+| LeNet5                             | 99.26%  | N/A          | N/A    | N/A    | N/A           |
+| LeNet5Improved                     | 99.12%  | N/A          | N/A    | N/A    | N/A           |
+| Advanced CNN                       | 99.43%  | N/A          | N/A    | N/A    | N/A           |
+| Weighted Averaging Ensemble        | 99.54%  | N/A          | N/A    | N/A    | N/A           |
 
 ## Configuration
 

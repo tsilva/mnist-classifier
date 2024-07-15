@@ -18,7 +18,7 @@ import torch.nn as nn
 import torch.optim as optim
 import torchvision
 import torchvision.transforms as transforms
-from torch.utils.data import Dataset, DataLoader, TensorDataset, random_split
+from torch.utils.data import Subset, Dataset, DataLoader, TensorDataset, random_split
 from tqdm import tqdm
 import wandb
 import yaml
@@ -46,9 +46,16 @@ DEFAULT_CONFIG = {
     },
     "loss_function": {
         "id": "CrossEntropyLoss"
+    },
+    "early_stopping": {
+        "id": "EarlyStopping",
+        "params": {
+            "patience": 20,  # Increase patience
+            "min_delta": 0.0001,  # Decrease min_delta
+            "verbose": False
+        }
     }
 }
-
 
 # Retrieve the device to run the models on
 # (use HW acceleration if available, otherwise use CPU)
@@ -210,6 +217,23 @@ def load_config(hyperparams_path=None):
         **hyperparams
     }
 
+def create_subset_loader(original_loader, percentage):
+    dataset = original_loader.dataset
+    num_samples = len(dataset)
+    num_subset_samples = int(num_samples * percentage)
+    
+    # Create a list of random indices
+    subset_indices = random.sample(range(num_samples), num_subset_samples)
+    
+    # Create a Subset of the original dataset
+    subset = Subset(dataset, subset_indices)
+    
+    # Create a new DataLoader with the subset
+    subset_loader = DataLoader(subset, batch_size=original_loader.batch_size, 
+                               shuffle=True, num_workers=original_loader.num_workers)
+    
+    return subset_loader
+
 """
 Parse the sweep configuration from W&B to a dictionary.
 Mapping dependent parameters from the flattened structure of the sweep config to the nested structure of our config.
@@ -243,8 +267,7 @@ class LeNet5Original(nn.Module):
         conv2_filters=16, 
         conv3_filters=120, 
         fc1_neurons=84, 
-        fc2_neurons=10, 
-        weight_init=None
+        fc2_neurons=10
     ):
         super(LeNet5Original, self).__init__()
 
@@ -300,9 +323,6 @@ class LeNet5Original(nn.Module):
             nn.Linear(fc1_neurons, fc2_neurons)
         )
 
-        # Conditional custom weight initialization
-        init_model_weights(self, weight_init)
-
     def forward(self, x):
         # Pass through the encoder
         # Input shape: (batch_size, 1, 28, 28)
@@ -334,7 +354,7 @@ LeNet-5 model with improvements (based on Kaggle entry `https://www.kaggle.com/c
 - ReLU activation functions
 """
 class LeNet5Improved(nn.Module):
-    def __init__(self, weight_init=None):
+    def __init__(self):
         super(LeNet5Improved, self).__init__()
         
         # Encodes the input into higher-dimensional representations
@@ -399,9 +419,6 @@ class LeNet5Improved(nn.Module):
             # Second fully connected layer
             nn.Linear(256, 10)
         )
-
-        # Conditional custom weight initialization
-        init_model_weights(self, weight_init)
     
     def forward(self, x):
         # Pass through the encoder
@@ -431,7 +448,7 @@ Better CNN model:
 - ReLU activation functions
 """
 class BestCNN(nn.Module):
-    def __init__(self, weight_init=None):
+    def __init__(self):
         super(BestCNN, self).__init__()
             
         # Encodes the input into higher-dimensional representations
@@ -500,9 +517,6 @@ class BestCNN(nn.Module):
         self.decoder = nn.Sequential(
             nn.Linear(128, 10)
         )
-        
-        # Conditional custom weight initialization
-        init_model_weights(self, weight_init)
 
     def forward(self, x):
         # Pass through the encoder
@@ -534,6 +548,7 @@ def build_model(model_config, model_state=None):
     }[model_id]
     model = model_constructor(**model_params)
     if model_state: model.load_state_dict(model_state)
+    else: init_model_weights(model, 'he') # TODO: softcode
     model = model.to(DEVICE)
     return model
 
@@ -677,7 +692,7 @@ def create_data_loaders(dataset="MNIST", batch_size=64, validation_split=0.0):
     return {'train': train_loader, 'validation': validation_loader, 'test': test_loader}
 
 
-def _train(config, data_loaders, n_epochs):
+def _train(config, data_loaders, n_epochs, train_data_percentage=None):
     # Retrieve hyperparameters from the config
     model_config = config['model']
     optimizer_config = config["optimizer"]
@@ -696,6 +711,11 @@ def _train(config, data_loaders, n_epochs):
 
     # Unpack data loaders
     train_loader = data_loaders['train']
+
+    # If a subset of the training data should be used, create a new loader
+    # (eg: this is used for creating bagging ensembles where each model 
+    # is trained on a different subset of the training data)
+    if train_data_percentage: train_loader = create_subset_loader(train_loader, train_data_percentage)
     
     # Build model, optimizer, learning rate scheduler, and loss function
     model = build_model(model_config)
