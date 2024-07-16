@@ -42,14 +42,16 @@ DATASETS = {
 
 # Define the default configuration for the model
 DEFAULT_CONFIG = {
+    "seed": 42,
     "use_mixed_precision": False,
-    "logging" : {
-        "image_interval": 5,
+    "logging": {
+        "interval": 1
     },
     "data_loader": {
-        "batch_size": 64
+        "batch_size": 64,
+        "validation_split": 0.0
     },
-    "optimizer" : {
+    "optimizer": {
         "id": "Adam"
     },
     "loss_function": {
@@ -58,10 +60,38 @@ DEFAULT_CONFIG = {
     "early_stopping": {
         "id": "EarlyStopping",
         "params": {
-            "patience": 20,  # Increase patience
-            "min_delta": 0.0001,  # Decrease min_delta
+            "patience": 20,
+            "min_delta": 0.0001,
             "verbose": False
         }
+    },
+    "data_augmentation": {
+        "pipeline": [
+            {
+                "name": "Rotate",
+                "params": {"limit": 30}
+            },
+            {
+                "name": "RandomResizedCrop",
+                "params": {"height": 28, "width": 28, "scale": [0.8, 1.0]}
+            },
+            {
+                "name": "GridDistortion",
+                "params": {"num_steps": 5, "distort_limit": 0.3, "p": 0.5}
+            },
+            {
+                "name": "CoarseDropout",
+                "params": {"max_holes": 1, "max_height": 10, "max_width": 10, "p": 0.5}
+            },
+            {
+                "name": "Normalize",
+                "params": {"mean": [0.1307], "std": [0.3081]}
+            },
+            {
+                "name": "ToTensorV2",
+                "params": {}
+            }
+        ]
     }
 }
 
@@ -149,6 +179,24 @@ class TransformDataset(Dataset):
         if self.transform: img = self.transform(img)
         return img, label
 
+def build_augmentation_pipeline(config, mean, std):
+    pipeline = []
+    for transform in config['data_augmentation']['pipeline']:
+        name = transform['name']
+        params = transform['params']
+        
+        if name == 'Normalize':
+            params['mean'] = [mean]
+            params['std'] = [std]
+        
+        if hasattr(A, name):
+            pipeline.append(getattr(A, name)(**params))
+        elif name == 'ToTensorV2':
+            pipeline.append(ToTensorV2())
+        else:
+            raise ValueError(f"Unknown transform: {name}")
+    
+    return A.Compose(pipeline)
 """
 Set a seed in the random number generators for reproducibility.
 """
@@ -220,10 +268,14 @@ def load_config(hyperparams_path=None):
             hyperparams = yaml.safe_load(file)
 
     # Merge the hyperparameters with the default configuration
-    return {
-        **DEFAULT_CONFIG,
-        **hyperparams
-    }
+    config = {**DEFAULT_CONFIG, **hyperparams}
+
+    # Ensure the data_augmentation pipeline is a list
+    if 'data_augmentation' in config and 'pipeline' in config['data_augmentation']:
+        if not isinstance(config['data_augmentation']['pipeline'], list):
+            config['data_augmentation']['pipeline'] = [config['data_augmentation']['pipeline']] 
+
+    return config
 
 def create_subset_loader(original_loader, percentage):
     dataset = original_loader.dataset
@@ -652,7 +704,9 @@ def _data_loader_worker_init_fn(worker_id):
     worker_seed = (base_seed + worker_id) % 2**32
     set_seed(worker_seed)
 
-def create_data_loaders(seed, dataset="MNIST", batch_size=64, validation_split=0.0):
+def create_data_loaders(config, dataset="MNIST", batch_size=64, validation_split=0.0):
+    seed = config['seed']
+    
     # Load the full dataset without transformations to calculate the overall mean and standard deviation
     # (we will use this information to normalize the inputs as to improve training performance)
     plain_train = DATASETS[dataset](root='./data', train=True, download=True, transform=transforms.ToTensor())
@@ -682,14 +736,7 @@ def create_data_loaders(seed, dataset="MNIST", batch_size=64, validation_split=0
 
     # Augment the train dataset
     augment_transform = AlbumentationsToTorchvision(
-        A.Compose([
-            A.Rotate(limit=30),
-            A.RandomResizedCrop(height=28, width=28, scale=(0.8, 1.0)),
-            A.GridDistortion(num_steps=5, distort_limit=0.3, p=0.5),
-            A.CoarseDropout(max_holes=1, max_height=10, max_width=10, p=0.5),
-            A.Normalize(mean=(overall_mean,), std=(overall_std,)),
-            ToTensorV2()
-        ])
+        build_augmentation_pipeline(config, overall_mean, overall_std)
     )
 
     # Wrap datasets in the custom TransformDataset class
@@ -754,7 +801,7 @@ def _train(config, data_loaders, n_epochs, train_data_percentage=None):
         }
     })
     logging_config = config.get("logging", {})
-    console_interval = logging_config.get("console_interval", 1)
+    logging_interval = logging_config["interval"]
 
     # Unpack data loaders
     train_loader = data_loaders['train']
@@ -834,8 +881,8 @@ def _train(config, data_loaders, n_epochs, train_data_percentage=None):
         # Evaluate performance on the validation set
         validation_metrics = _evaluate(
             config, model, data_loaders, "validation", 
-            log_confusion_matrix=epoch % 10 == 0, # TODO: softcode log interval
-            log_misclassifications=epoch % 10 == 0, 
+            log_confusion_matrix=epoch % logging_interval == 0,
+            log_misclassifications=epoch % logging_interval == 0, 
         )
         validation_accuracy = validation_metrics["validation/accuracy"]
         validation_loss = validation_metrics["validation/loss"]
@@ -863,7 +910,7 @@ def _train(config, data_loaders, n_epochs, train_data_percentage=None):
         wandb.log(metrics, step=epoch)
 
         # Periodic logging to console
-        if epoch % console_interval == 0:
+        if epoch % logging_interval == 0:
             logging.info(json.dumps({
                 "epoch": epoch,
                 "train/loss" : train_loss,
@@ -1090,7 +1137,7 @@ def sweep(seeds=[42]):
         best_validation_accuracies = []
         for seed in seeds:
             set_seed(seed)
-            data_loaders = create_data_loaders(seed, **data_loader_config)
+            data_loaders = create_data_loaders({**config, "seed" : seed}, **data_loader_config)
             best_validation_accuracy, _ = _train(config, data_loaders, n_epochs)
             best_validation_accuracies.append(best_validation_accuracy)
         best_validation_accuracy = np.mean(best_validation_accuracies)
@@ -1128,7 +1175,7 @@ def main():
         **data_loader_config, 
         "dataset": data_loader_config.get("dataset", args.dataset) # Use command-line dataset if none was specified in the config file
     }
-    data_loaders = create_data_loaders(args.seed, **create_data_loaders_kwargs)
+    data_loaders = create_data_loaders(config, **create_data_loaders_kwargs)
 
     # Train the model
     if args.mode == 'train': train(config, data_loaders, args.n_epochs, args.model_output_dir)
