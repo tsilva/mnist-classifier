@@ -1,7 +1,13 @@
+# Configure maximum number of threads for NumExpr 
+# before importing libs that require it
+import os
+import multiprocessing
+NUM_CORES = multiprocessing.cpu_count()
+if not "NUMEXPR_MAX_THREADS" in os.environ: os.environ["NUMEXPR_MAX_THREADS"] = str(NUM_CORES)
+
 import argparse
 import atexit
 import logging
-import os
 import json
 import random
 import sys
@@ -22,6 +28,7 @@ from torch.utils.data import Subset, Dataset, DataLoader, TensorDataset, random_
 from tqdm import tqdm
 import wandb
 import yaml
+import torch.cuda.amp as amp
 
 PROJECT_NAME = 'mnist-classifier'
 
@@ -35,6 +42,7 @@ DATASETS = {
 
 # Define the default configuration for the model
 DEFAULT_CONFIG = {
+    "use_mixed_precision": False,
     "logging" : {
         "image_interval": 5,
     },
@@ -438,7 +446,7 @@ class LeNet5Improved(nn.Module):
         return x
 
 """
-Better CNN model:
+Advanced CNN model:
 
 - 7 convolutional layers
 - Different kernel sizes and strides
@@ -447,9 +455,9 @@ Better CNN model:
 - Dropout
 - ReLU activation functions
 """
-class BestCNN(nn.Module):
+class AdvancedCNN(nn.Module):
     def __init__(self):
-        super(BestCNN, self).__init__()
+        super(AdvancedCNN, self).__init__()
             
         # Encodes the input into higher-dimensional representations
         self.encoder = nn.Sequential(
@@ -544,7 +552,7 @@ def build_model(model_config, model_state=None):
     model_constructor = {
         "LeNet5Original": LeNet5Original,
         "LeNet5Improved": LeNet5Improved,
-        "BestCNN": BestCNN
+        "AdvancedCNN": AdvancedCNN
     }[model_id]
     model = model_constructor(**model_params)
     if model_state: model.load_state_dict(model_state)
@@ -638,7 +646,13 @@ def augment_dataset(original_dataset, default_transform, augment_transform, n_ne
     
     return augmented_dataset
 
-def create_data_loaders(dataset="MNIST", batch_size=64, validation_split=0.0):
+def _data_loader_worker_init_fn(worker_id):
+    worker_info = torch.utils.data.get_worker_info()
+    base_seed = worker_info.seed
+    worker_seed = (base_seed + worker_id) % 2**32
+    set_seed(worker_seed)
+
+def create_data_loaders(seed, dataset="MNIST", batch_size=64, validation_split=0.0):
     # Load the full dataset without transformations to calculate the overall mean and standard deviation
     # (we will use this information to normalize the inputs as to improve training performance)
     plain_train = DATASETS[dataset](root='./data', train=True, download=True, transform=transforms.ToTensor())
@@ -682,11 +696,43 @@ def create_data_loaders(dataset="MNIST", batch_size=64, validation_split=0.0):
     train_dataset = TransformDataset(train_dataset, transform=augment_transform)
     validation_dataset = TransformDataset(validation_dataset, transform=default_transform)
     test_dataset = TransformDataset(test_dataset, transform=default_transform)
-
+    
     # Create the data loaders
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True) # TODO: faster without got half the performance if I increased num_workers and/or set pin_memory=True (find reason why)
-    validation_loader = DataLoader(validation_dataset, batch_size=batch_size, shuffle=False)
-    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
+    num_workers = NUM_CORES
+    prefetch_factor = 2
+    train_loader = DataLoader(
+        train_dataset, 
+        batch_size=batch_size, 
+        shuffle=True, 
+        num_workers=num_workers,
+        persistent_workers=True,
+        worker_init_fn=_data_loader_worker_init_fn, 
+        generator=torch.Generator().manual_seed(seed), 
+        prefetch_factor=prefetch_factor,
+        pin_memory=True
+    )
+    validation_loader = DataLoader(
+        validation_dataset, 
+        batch_size=batch_size, 
+        shuffle=False, 
+        num_workers=num_workers, 
+        persistent_workers=True,
+        worker_init_fn=_data_loader_worker_init_fn, 
+        generator=torch.Generator().manual_seed(seed), 
+        prefetch_factor=prefetch_factor,
+        pin_memory=True
+    )
+    test_loader = DataLoader(
+        test_dataset, 
+        batch_size=batch_size, 
+        shuffle=False, 
+        num_workers=num_workers, 
+        persistent_workers=True,
+        worker_init_fn=_data_loader_worker_init_fn, 
+        generator=torch.Generator().manual_seed(seed), 
+        prefetch_factor=prefetch_factor,
+        pin_memory=True
+    )
 
     # Return the data loaders
     return {'train': train_loader, 'validation': validation_loader, 'test': test_loader}
@@ -694,6 +740,7 @@ def create_data_loaders(dataset="MNIST", batch_size=64, validation_split=0.0):
 
 def _train(config, data_loaders, n_epochs, train_data_percentage=None):
     # Retrieve hyperparameters from the config
+    use_mixed_precision = config["use_mixed_precision"]
     model_config = config['model']
     optimizer_config = config["optimizer"]
     loss_function_config = config["loss_function"]
@@ -723,7 +770,8 @@ def _train(config, data_loaders, n_epochs, train_data_percentage=None):
     lr_scheduler = build_lr_scheduler(optimizer, lr_scheduler_config)
     loss_function = build_loss_function(loss_function_config)
     early_stopping = build_early_stopping(early_stopping_config) 
-
+    gradient_scaler = amp.GradScaler() if use_mixed_precision else None
+    
     # Log the model architecture
     wandb.watch(model)
 
@@ -738,37 +786,40 @@ def _train(config, data_loaders, n_epochs, train_data_percentage=None):
         running_loss = 0.0
         correct = 0
         total = 0
-        all_labels = []
-        all_predictions = []
 
         num_batch_loads = 0
         batch_load_start = time.time()
         total_batch_load_time = 0
         for images, labels in train_loader:
-            images, labels = images.to(DEVICE), labels.to(DEVICE)
+            images, labels = images.to(DEVICE, non_blocking=True), labels.to(DEVICE, non_blocking=True)
             num_batch_loads += 1
             total_batch_load_time += time.time() - batch_load_start
 
-            # Perform forward pass
-            predictions = model(images)
+            if use_mixed_precision:
+                with amp.autocast():
+                    predictions = model(images)
+                    loss = loss_function(predictions, labels)
+                optimizer.zero_grad()
+                gradient_scaler.scale(loss).backward()
+                gradient_scaler.step(optimizer)
+                gradient_scaler.update()
+            else:
+                # Perform forward pass
+                predictions = model(images)
 
-            # Compute loss
-            loss = loss_function(predictions, labels)
+                # Compute loss
+                loss = loss_function(predictions, labels)
 
-            # Perform backpropagation
-            optimizer.zero_grad() # Zero out the gradients
-            loss.backward() # Compute gradients
-            optimizer.step() # Update weights
+                # Perform backpropagation
+                optimizer.zero_grad() # Zero out the gradients
+                loss.backward() # Compute gradients
+                optimizer.step() # Update weights
 
-            # TODO: comment this
-            running_loss += loss.item() * images.size(0)
+            # Accumulate metrics on GPU
+            running_loss += loss
             _, predicted = torch.max(predictions.data, 1)
             total += labels.size(0)
-            correct += (predicted == labels).sum().item()
-
-            # Collect labels and predictions for confusion matrix
-            all_labels.extend(labels.cpu().numpy())
-            all_predictions.extend(predicted.cpu().numpy())
+            correct += (predicted == labels).sum()
 
             # Reset the batch load timer
             batch_load_start = time.time()
@@ -776,13 +827,13 @@ def _train(config, data_loaders, n_epochs, train_data_percentage=None):
         # Calculate average batch load time
         average_batch_load_time = total_batch_load_time / num_batch_loads
 
-        # Calculate train loss and accuracy
-        train_loss = running_loss / len(train_loader.dataset)
-        train_accuracy = 100 * correct / total
+        # Calculate metrics on CPU only once per epoch
+        train_loss = (running_loss / len(train_loader)).item()
+        train_accuracy = (100 * correct / total).item()
 
         # Evaluate performance on the validation set
         validation_metrics = _evaluate(
-            model, data_loaders, "validation", 
+            config, model, data_loaders, "validation", 
             log_confusion_matrix=epoch % 10 == 0, # TODO: softcode log interval
             log_misclassifications=epoch % 10 == 0, 
         )
@@ -828,11 +879,10 @@ def _train(config, data_loaders, n_epochs, train_data_percentage=None):
             lr_scheduler.step(validation_loss)
 
         # Check if we should stop early
-        if early_stopping(validation_loss):
+        if early_stopping and early_stopping(validation_loss):
             logging.info(f"Early stopping triggered at epoch {epoch}")
             break
         
-
     # Return training results
     return {
         "train/last_epoch": epoch,
@@ -850,7 +900,7 @@ def train(config, data_loaders, n_epochs, model_output_dir):
     model_config = config['model']
     model_id = model_config['id']
     date_s = time.strftime('%Y%m%dT%H%M%S')
-    run_id = f"train__{date_s}__{model_id}"
+    run_id = f"train__{model_id}__{date_s}"
     with wandb.init(project=PROJECT_NAME, id=run_id, config=config) as run:
         # Perform training
         train_results = _train(config, data_loaders, n_epochs)
@@ -859,7 +909,7 @@ def train(config, data_loaders, n_epochs, model_output_dir):
         # Save the best model to disk
         best_model = build_model(model_config, model_state=best_model_state)
         if not os.path.exists(model_output_dir): os.makedirs(model_output_dir)
-        best_model_path = f"{model_output_dir}/best_model_{run_id}.pth"
+        best_model_path = f"{model_output_dir}/best_{run_id}.pth"
         scripted_model = torch.jit.script(best_model)
         scripted_model.save(best_model_path)
         
@@ -873,7 +923,7 @@ def train(config, data_loaders, n_epochs, model_output_dir):
 
         # Evaluate the best model on the test set
         test_metrics = _evaluate(
-            best_model, data_loaders, "test", 
+            config, best_model, data_loaders, "test", 
             log_confusion_matrix=True, 
             log_misclassifications=True
         )
@@ -889,21 +939,23 @@ def train(config, data_loaders, n_epochs, model_output_dir):
 Evaluates the model on the specified test set.
 Logs the evaluation results to W&B.
 """
-def evaluate(model, data_loaders, loader_type):
+def evaluate(config, model, data_loaders, loader_type):
     date_s = time.strftime('%Y%m%dT%H%M%S')
     run_id = f"evaluate__{date_s}"
     with wandb.init(project=PROJECT_NAME, id=run_id): 
-        metrics = _evaluate(model, data_loaders, loader_type)
+        metrics = _evaluate(config, model, data_loaders, loader_type)
         wandb.log(metrics)
         return metrics
-
 def _evaluate(
+    config,
     model, 
     data_loaders, 
     loader_type, 
     log_confusion_matrix=False, 
     log_misclassifications=False
 ):
+    use_mixed_precision = config["use_mixed_precision"]
+
     # Load the model if a path was provided
     if isinstance(model, str): model = load_ensemble(model)
     
@@ -914,10 +966,11 @@ def _evaluate(
     model.eval()
 
     # Define the loss function
-    criterion = nn.CrossEntropyLoss()
+    loss_function = nn.CrossEntropyLoss()
 
     correct = total = running_loss = 0
-    all_data = []
+    all_labels = []
+    all_predictions = []
     misclassifications = []
 
     # Evaluate the model
@@ -927,15 +980,19 @@ def _evaluate(
         batch_load_start = time.time()
         total_batch_load_time = 0
         for images, labels in loader:
-            images, labels = images.to(DEVICE), labels.to(DEVICE) # Move images and labels to the device for inference
+            images, labels = images.to(DEVICE, non_blocking=True), labels.to(DEVICE, non_blocking=True)
             num_batch_loads += 1
             total_batch_load_time += time.time() - batch_load_start
 
-            # Perform forward pass
-            predictions = model(images)
+            if use_mixed_precision:
+                with amp.autocast():
+                    predictions = model(images)
+                    loss = loss_function(predictions, labels)
+            else:
+                predictions = model(images)
+                loss = loss_function(predictions, labels)
 
             # Compute loss
-            loss = criterion(predictions, labels)
             running_loss += loss.item() * images.size(0)
 
             # Get the index of the max log-probability (the predicted class)
@@ -945,24 +1002,25 @@ def _evaluate(
             total += labels.size(0)
             correct += (predicted == labels).sum().item()
 
-            # Move data back to CPU and collect results
-            cpu_images, cpu_labels, cpu_predicted = images.cpu(), labels.cpu(), predicted.cpu()
-            all_data.extend(zip(cpu_images, cpu_labels, cpu_predicted))
-            
+            # Collect labels and predictions
+            all_labels.append(labels)
+            all_predictions.append(predicted)
+
             # Collect misclassifications
             misclassifications.extend([
-                (img, lbl, pred) for img, lbl, pred in zip(cpu_images, cpu_labels, cpu_predicted) 
+                (img, lbl, pred) for img, lbl, pred in zip(images, labels, predicted) 
                 if lbl != pred
             ])
 
             # Reset the batch load timer
             batch_load_start = time.time()
 
+    # Concatenate all labels and predictions
+    all_labels = torch.cat(all_labels).cpu()
+    all_predictions = torch.cat(all_predictions).cpu()
+
     # Calculate average batch load time
     average_batch_load_time = total_batch_load_time / num_batch_loads
-    
-    # Extract all labels and predictions
-    all_labels, all_predictions = zip(*[(lbl.item(), pred.item()) for _, lbl, pred in all_data])
 
     # Calculate metrics:
     # - Accuracy: the percentage of correctly classified samples
@@ -1003,8 +1061,8 @@ def _evaluate(
         misclassified_images = []
         for img, true_label, pred_label in misclassifications[:25]:  # Limit to 25 images
             plt.figure(figsize=(2, 2))
-            plt.imshow(img.squeeze(), cmap='gray')
-            plt.title(f'True: {true_label}, Pred: {pred_label}')
+            plt.imshow(img.squeeze().cpu(), cmap='gray')
+            plt.title(f'True: {true_label.item()}, Pred: {pred_label.item()}')
             plt.axis('off')
             misclassified_images.append(wandb.Image(plt))
             plt.close()
@@ -1032,7 +1090,7 @@ def sweep(seeds=[42]):
         best_validation_accuracies = []
         for seed in seeds:
             set_seed(seed)
-            data_loaders = create_data_loaders(**data_loader_config)
+            data_loaders = create_data_loaders(seed, **data_loader_config)
             best_validation_accuracy, _ = _train(config, data_loaders, n_epochs)
             best_validation_accuracies.append(best_validation_accuracy)
         best_validation_accuracy = np.mean(best_validation_accuracies)
@@ -1070,11 +1128,11 @@ def main():
         **data_loader_config, 
         "dataset": data_loader_config.get("dataset", args.dataset) # Use command-line dataset if none was specified in the config file
     }
-    data_loaders = create_data_loaders(**create_data_loaders_kwargs)
+    data_loaders = create_data_loaders(args.seed, **create_data_loaders_kwargs)
 
     # Train the model
     if args.mode == 'train': train(config, data_loaders, args.n_epochs, args.model_output_dir)
-    elif args.mode == 'eval': evaluate(args.model_path, data_loaders, "test")
+    elif args.mode == 'eval': evaluate(config, args.model_path, data_loaders, "test")
 
 if __name__ == '__main__':
     # In case this is being run by a wandb 

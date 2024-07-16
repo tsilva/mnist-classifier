@@ -1,4 +1,4 @@
 model:
-  id: BestCNN
+  id: AdvancedCNN
 lr_scheduler:
   id: ReduceLROnPlateau
