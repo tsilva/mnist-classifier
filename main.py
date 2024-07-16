@@ -652,6 +652,7 @@ def build_loss_function(loss_function_config):
     return loss_function
 
 def build_early_stopping(early_stopping_config):
+    if not early_stopping_config: return None
     early_stopping_id = early_stopping_config['id']
     early_stopping_params = early_stopping_config.get('params', {})
     early_stopping = {
@@ -792,14 +793,7 @@ def _train(config, data_loaders, n_epochs, train_data_percentage=None):
     optimizer_config = config["optimizer"]
     loss_function_config = config["loss_function"]
     lr_scheduler_config = config.get("lr_scheduler")
-    early_stopping_config = config.get("early_stopping", {
-        "id" : "EarlyStopping",
-        "params" : {
-            "patience": 10, 
-            "min_delta": 0.001, 
-            "verbose": True
-        }
-    })
+    early_stopping_config = config.get("early_stopping")
     logging_config = config.get("logging", {})
     logging_interval = logging_config["interval"]
 
@@ -1160,7 +1154,7 @@ def main():
     parser.add_argument("--dataset", type=str, default="MNIST", help='Dataset to use for training and evaluation')
     parser.add_argument("--seed", type=int, default=42, help="Random seeds to use for training")
     parser.add_argument("--n_epochs", type=int, default=200, help='Number of epochs to train the model for')
-    parser.add_argument("--hyperparams_path", type=str, default="configs/hyperparams/LeNet5Original.yml", help='Path to the hyperparameters file')
+    parser.add_argument("--hyperparams_path", type=str, default="configs/hyperparams/AdvancedCNN.yml", help='Path to the hyperparameters file')
     parser.add_argument("--model_path", type=str, default="outputs/best_model.pth", help='Path to the model file for evaluation')
     parser.add_argument("--model_output_dir", type=str, default="outputs", help='Directory to save the model file')
     args = parser.parse_args()
