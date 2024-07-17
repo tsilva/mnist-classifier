@@ -622,6 +622,7 @@ def build_loss_function(loss_function_config):
     return loss_function
 
 def build_early_stopping(early_stopping_config):
+    if not early_stopping_config: return None
     early_stopping_id = early_stopping_config['id']
     early_stopping_params = early_stopping_config.get('params', {})
     early_stopping = {
@@ -728,14 +729,7 @@ def _train(config, data_loaders, n_epochs, best_model_path, train_data_percentag
     optimizer_config = config["optimizer"]
     loss_function_config = config["loss_function"]
     lr_scheduler_config = config.get("lr_scheduler")
-    early_stopping_config = config.get("early_stopping", {
-        "id" : "EarlyStopping",
-        "params" : {
-            "patience": 10, 
-            "min_delta": 0.001, 
-            "verbose": True
-        }
-    })
+    early_stopping_config = config.get("early_stopping")
     logging_config = config.get("logging", {})
     logging_interval = logging_config["interval"]
 
