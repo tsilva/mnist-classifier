@@ -13,8 +13,6 @@ import random
 import sys
 import time
 
-import albumentations as A
-from albumentations.pytorch import ToTensorV2
 import matplotlib.pyplot as plt
 import numpy as np
 import seaborn as sns
@@ -22,23 +20,15 @@ from sklearn.metrics import confusion_matrix, f1_score, precision_score, recall_
 import torch
 import torch.nn as nn
 import torch.optim as optim
-import torchvision
 import torchvision.transforms as transforms
-from torch.utils.data import Subset, Dataset, DataLoader, TensorDataset, random_split
+from torch.utils.data import Subset, DataLoader, random_split
 from tqdm import tqdm
 import wandb
 import yaml
 import torch.cuda.amp as amp
+from datasets import load_dataset, get_dataset_metrics, build_albumentations_pipeline, DatasetTransformWrapper
 
 PROJECT_NAME = 'mnist-classifier'
-
-# The supported datasets
-DATASETS = {
-    "MNIST": torchvision.datasets.MNIST,
-    "KMNIST": torchvision.datasets.KMNIST,
-    "QMNIST": torchvision.datasets.QMNIST,
-    "FashionMNIST": torchvision.datasets.FashionMNIST
-}
 
 # Define the default configuration for the model
 DEFAULT_CONFIG = {
@@ -82,14 +72,6 @@ DEFAULT_CONFIG = {
             {
                 "name": "CoarseDropout",
                 "params": {"max_holes": 1, "max_height": 10, "max_width": 10, "p": 0.5}
-            },
-            {
-                "name": "Normalize",
-                "params": {"mean": [0.1307], "std": [0.3081]}
-            },
-            {
-                "name": "ToTensorV2",
-                "params": {}
             }
         ]
     }
@@ -115,6 +97,7 @@ def cleanup():
 atexit.register(cleanup)
 
 class EnsembleModel(nn.Module):
+
     def __init__(self, models):
         super(EnsembleModel, self).__init__()
         self.models = nn.ModuleList(models)
@@ -124,6 +107,7 @@ class EnsembleModel(nn.Module):
         return torch.stack(outputs).mean(dim=0)
     
 class EarlyStopping:
+
     def __init__(self, patience=5, min_delta=0, verbose=False):
         self.patience = patience
         self.min_delta = min_delta
@@ -150,53 +134,44 @@ class EarlyStopping:
 
         return self.early_stop
 
-"""
-Converts an Albumentations transform to a torchvision transform.
-"""
-class AlbumentationsToTorchvision:
-    def __init__(self, albumentations_transform):
-        self.albumentations_transform = albumentations_transform
+class OptionalWandbContext:
 
-    def __call__(self, img):
-        img = np.array(img)
-        transformed = self.albumentations_transform(image=img)
-        return transformed['image']
+    def __init__(self, use_wandb, *args, **kwargs):
+        self.use_wandb = use_wandb
+        self.args = args
+        self.kwargs = kwargs
+        self.run = None
 
-"""
-Wrapper class that applies a transformation to any dataset regardless
-of whether it is a PyTorch dataset or not (eg: a Subset caused by a split).
-"""
-class TransformDataset(Dataset):
-    def __init__(self, dataset, transform=None):
-        self.dataset = dataset
-        self.transform = transform
+    def __enter__(self):
+        if self.use_wandb:
+            self.run = wandb.init(*self.args, **self.kwargs)
+        return self
 
-    def __len__(self):
-        return len(self.dataset)
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if self.use_wandb and self.run:
+            self.run.finish()
 
-    def __getitem__(self, idx):
-        img, label = self.dataset[idx]
-        if self.transform: img = self.transform(img)
-        return img, label
+    def log(self, *args, **kwargs):
+        if self.use_wandb:
+            wandb.log(*args, **kwargs)
 
-def build_augmentation_pipeline(config, mean, std):
-    pipeline = []
-    for transform in config['data_augmentation']['pipeline']:
-        name = transform['name']
-        params = transform['params']
-        
-        if name == 'Normalize':
-            params['mean'] = [mean]
-            params['std'] = [std]
-        
-        if hasattr(A, name):
-            pipeline.append(getattr(A, name)(**params))
-        elif name == 'ToTensorV2':
-            pipeline.append(ToTensorV2())
-        else:
-            raise ValueError(f"Unknown transform: {name}")
+    def watch(self, *args, **kwargs):
+        if self.use_wandb:
+            wandb.watch(*args, **kwargs)
+
+    def save(self, *args, **kwargs):
+        if self.use_wandb:
+            wandb.save(*args, **kwargs)
+
+    def Artifact(self, *args, **kwargs):
+        if self.use_wandb:
+            return wandb.Artifact(*args, **kwargs)
+        return None
+
+    def log_artifact(self, *args, **kwargs):
+        if self.use_wandb and self.run:
+            self.run.log_artifact(*args, **kwargs)
     
-    return A.Compose(pipeline)
 """
 Set a seed in the random number generators for reproducibility.
 """
@@ -233,14 +208,14 @@ def load_model(model_path):
         entity_id = url_tokens[3]
         project_name = url_tokens[4]
         run_id = url_tokens[6]
-        model_file_name = f"best_model_{run_id}.pth"
+        model_file_name = f"best_model_{run_id}.jit"
         artifact_path = f"{entity_id}/{project_name}/{model_file_name}:latest"
         logging.info(f"Downloading model artifact: {artifact_path}")
         artifact = wandb.use_artifact(artifact_path, type='model')
         artifact_dir = artifact.download()
         model_path = f"{artifact_dir}/{model_file_name}"
     
-    if model_path.endswith('.pth'): model = torch.load(model_path)
+    if model_path.endswith('.jit'): model = torch.jit.load(model_path)
     elif model_path.endswith('.onnx'): model = torch.onnx.load(model_path)
     else: raise ValueError(f"Unsupported model file format: {model_path}")
     return model
@@ -249,7 +224,7 @@ def load_ensemble(model_path):
     if os.path.isdir(model_path):
         models = []
         for filename in os.listdir(model_path):
-            if filename.endswith('.pth') or filename.endswith('.onnx'):
+            if filename.endswith('jit') or filename.endswith('.onnx'):
                 full_path = os.path.join(model_path, filename)
                 models.append(load_model(full_path))
     else:
@@ -269,11 +244,6 @@ def load_config(hyperparams_path=None):
 
     # Merge the hyperparameters with the default configuration
     config = {**DEFAULT_CONFIG, **hyperparams}
-
-    # Ensure the data_augmentation pipeline is a list
-    if 'data_augmentation' in config and 'pipeline' in config['data_augmentation']:
-        if not isinstance(config['data_augmentation']['pipeline'], list):
-            config['data_augmentation']['pipeline'] = [config['data_augmentation']['pipeline']] 
 
     return config
 
@@ -659,91 +629,53 @@ def build_early_stopping(early_stopping_config):
     }[early_stopping_id](**early_stopping_params)
     return early_stopping
 
-def calculate_mean_std(dataset):
-    loader = DataLoader(dataset)
-    data = next(iter(loader))[0]
-    mean = data.mean().item()
-    std = data.std().item()
-    return mean, std
-
-def augment_dataset(original_dataset, default_transform, augment_transform, n_new_images):
-    augmented_images = []
-    augmented_labels = []
-    
-    with tqdm(total=n_new_images, desc="Augmenting data") as pbar:
-        while len(augmented_images) < n_new_images:
-            for img, label in original_dataset:
-                if len(augmented_images) >= n_new_images:
-                    break
-                img = augment_transform(img)
-                augmented_images.append(img)
-                augmented_labels.append(label)
-                pbar.update(1)  # Update progress bar by 1 for each image
-
-    augmented_images = torch.stack(augmented_images)
-    augmented_labels = torch.tensor(augmented_labels)
-    
-    original_images, original_labels = [], []
-    for img, label in original_dataset:
-        original_images.append(default_transform(img))
-        original_labels.append(label)
-
-    original_images = torch.stack(original_images)
-    original_labels = torch.tensor(original_labels)
-
-    final_images = torch.cat((original_images, augmented_images))
-    final_labels = torch.cat((original_labels, augmented_labels))
-
-    augmented_dataset = TensorDataset(final_images, final_labels)
-    
-    return augmented_dataset
-
 def _data_loader_worker_init_fn(worker_id):
     worker_info = torch.utils.data.get_worker_info()
     base_seed = worker_info.seed
     worker_seed = (base_seed + worker_id) % 2**32
     set_seed(worker_seed)
 
-def create_data_loaders(config, dataset="MNIST", batch_size=64, validation_split=0.0):
+def create_data_loaders(config, dataset_name="mnist", batch_size=64, validation_split=0.0):
+    # Retrieve config params
     seed = config['seed']
-    
-    # Load the full dataset without transformations to calculate the overall mean and standard deviation
-    # (we will use this information to normalize the inputs as to improve training performance)
-    plain_train = DATASETS[dataset](root='./data', train=True, download=True, transform=transforms.ToTensor())
-    plain_test = DATASETS[dataset](root='./data', train=False, download=True, transform=transforms.ToTensor())
-    combined_data = torch.utils.data.ConcatDataset([plain_train, plain_test])
-    overall_mean, overall_std = calculate_mean_std(combined_data)
-    logging.info(f'Overall Mean: {overall_mean}, Overall Std: {overall_std}')
-    
-    # Split the training dataset into training and validation sets
-    full_train_dataset = DATASETS[dataset](root='./data', train=True, download=True)
-    test_dataset = DATASETS[dataset](root='./data', train=False, download=True)
+    data_augmentation_config = config.get('data_augmentation', {})
+    data_augmentation_pipeline_config = data_augmentation_config.get('pipeline', [])
+
+    # Load dataste and calculate its metrics
+    dataset = load_dataset(dataset_name)
+    dataset_metrics = get_dataset_metrics(dataset)
+    logging.info("Dataset metrics:" + json.dumps(dataset_metrics, indent=2))
+
+    # Unpack the dataset into training, validation, and test sets
+    train_dataset = dataset['train']
+    test_dataset = dataset['test']
+    validation_dataset = test_dataset
+
+    # In case a validation split was specified then replace 
+    # the validation set with a subset of the training set
     if validation_split > 0:
-        train_size = int((1 - validation_split) * len(full_train_dataset))
-        validation_size = len(full_train_dataset) - train_size
-        train_dataset, validation_dataset = random_split(full_train_dataset, [train_size, validation_size])
-    # If no validation split is specified, use the test set as the validation set
-    else:
-        train_dataset = full_train_dataset
-        validation_dataset = test_dataset
-    
+        train_size = int((1 - validation_split) * len(train_dataset))
+        validation_size = len(train_dataset) - train_size
+        train_dataset, validation_dataset = random_split(train_dataset, [train_size, validation_size])
+
     # Apply the default transformation to the datasets
     # (normalize the inputs using the overall mean and standard deviation)
+    dataset_mean = dataset_metrics['mean']
+    dataset_std = dataset_metrics['std']
     default_transform = transforms.Compose([
-        transforms.ToTensor(),
-        transforms.Normalize((overall_mean,), (overall_std,))
+        transforms.Normalize((dataset_mean,), (dataset_std,))
     ])
 
-    # Augment the train dataset
-    augment_transform = AlbumentationsToTorchvision(
-        build_augmentation_pipeline(config, overall_mean, overall_std)
-    )
+    # Build the data augmentation pipeline
+    augment_transform = build_albumentations_pipeline(data_augmentation_pipeline_config, dataset_mean, dataset_std)
+       
+    # Wrap datasets with their respective transform operations
+    # (this will make transformations work regardless of wheter
+    # the dataset is a Dataset or a Subset)
+    train_dataset = DatasetTransformWrapper(train_dataset, transform=augment_transform)
+    validation_dataset = DatasetTransformWrapper(validation_dataset, transform=default_transform)
+    test_dataset = DatasetTransformWrapper(test_dataset, transform=default_transform)
 
-    # Wrap datasets in the custom TransformDataset class
-    train_dataset = TransformDataset(train_dataset, transform=augment_transform)
-    validation_dataset = TransformDataset(validation_dataset, transform=default_transform)
-    test_dataset = TransformDataset(test_dataset, transform=default_transform)
-    
     # Create the data loaders
     num_workers = NUM_CORES
     prefetch_factor = 2
@@ -782,10 +714,14 @@ def create_data_loaders(config, dataset="MNIST", batch_size=64, validation_split
     )
 
     # Return the data loaders
-    return {'train': train_loader, 'validation': validation_loader, 'test': test_loader}
+    return {
+        'train': train_loader, 
+        'validation': validation_loader, 
+        'test': test_loader
+    }
 
 
-def _train(config, data_loaders, n_epochs, train_data_percentage=None):
+def _train(config, data_loaders, n_epochs, best_model_path, train_data_percentage=None, wandb_run=None):
     # Retrieve hyperparameters from the config
     use_mixed_precision = config["use_mixed_precision"]
     model_config = config['model']
@@ -818,13 +754,13 @@ def _train(config, data_loaders, n_epochs, train_data_percentage=None):
     loss_function = build_loss_function(loss_function_config)
     early_stopping = build_early_stopping(early_stopping_config) 
     gradient_scaler = amp.GradScaler() if use_mixed_precision else None
-    
+
     # Log the model architecture
-    wandb.watch(model)
+    if wandb_run: wandb_run.watch(model)
 
     # Train for X epochs
     best_validation_accuracy = 0.0
-    best_model_state = None
+    best_model = None
     best_epoch = None
     for epoch in tqdm(range(1, n_epochs + 1), desc="Training model"):
         # Set the model in training mode
@@ -891,7 +827,8 @@ def _train(config, data_loaders, n_epochs, train_data_percentage=None):
         if validation_accuracy > best_validation_accuracy:
             best_validation_accuracy = validation_accuracy
             best_epoch = epoch
-            best_model_state = model.state_dict()
+            best_model = torch.jit.script(model)
+            best_model.save(best_model_path)
             logging.debug(f'Saved best model with accuracy: {best_validation_accuracy:.2f}%')
 
         # Create metrics
@@ -907,7 +844,7 @@ def _train(config, data_loaders, n_epochs, train_data_percentage=None):
         if learning_rate: metrics["train/learning_rate"] = learning_rate
 
         # Log metrics to W&B
-        wandb.log(metrics, step=epoch)
+        if wandb_run: wandb_run.log(metrics, step=epoch)
 
         # Periodic logging to console
         if epoch % logging_interval == 0:
@@ -935,64 +872,72 @@ def _train(config, data_loaders, n_epochs, train_data_percentage=None):
         "train/last_epoch": epoch,
         "validation/best_accuracy": best_validation_accuracy,
         "validation/best_epoch": best_epoch,
-        "validation/best_model_state": best_model_state,
+        "validation/best_model": best_model
     }
 
 """
 Train the model for the specified number of epochs.
 Logs the training progress and results to W&B.
 """
-def train(config, data_loaders, n_epochs, model_output_dir): 
+def train(config, data_loaders, n_epochs, model_output_dir, n_models=1, wandb_enabled=False): 
     # Perform training within the context of a W&B run
     model_config = config['model']
     model_id = model_config['id']
-    date_s = time.strftime('%Y%m%dT%H%M%S')
-    run_id = f"train__{model_id}__{date_s}"
-    with wandb.init(project=PROJECT_NAME, id=run_id, config=config) as run:
-        # Perform training
-        train_results = _train(config, data_loaders, n_epochs)
-        best_model_state = train_results["validation/best_model_state"]
 
-        # Save the best model to disk
-        best_model = build_model(model_config, model_state=best_model_state)
-        if not os.path.exists(model_output_dir): os.makedirs(model_output_dir)
-        best_model_path = f"{model_output_dir}/best_{run_id}.pth"
-        scripted_model = torch.jit.script(best_model)
-        scripted_model.save(best_model_path)
-        
-        # Upload best model to W&B
-        logging.info(f"Uploading model to W&B: {best_model_path}")
-        wandb.save(best_model_path)
-        artifact_name = best_model_path.split("/")[-1]
-        artifact = wandb.Artifact(artifact_name, type='model')
-        artifact.add_file(best_model_path)
-        run.log_artifact(artifact)
+    # Create the model output dir in case it doesn't exist yet
+    if not os.path.exists(model_output_dir): os.makedirs(model_output_dir)
 
-        # Evaluate the best model on the test set
-        test_metrics = _evaluate(
-            config, best_model, data_loaders, "test", 
-            log_confusion_matrix=True, 
-            log_misclassifications=True
-        )
-        wandb.log(test_metrics)
+    # Train the number of specified models
+    # (eg: >1 for training ensembles)
+    results = {}
+    for model_idx in range(n_models):
+        if n_models > 1: model_run_id = f"{model_id}__{time.strftime('%Y%m%d')}__{model_idx}"
+        else: model_run_id = f"{model_id}__{time.strftime('%Y%m%dT%H%M%S')}"
+        wandb_run_id = f"train__{model_run_id}"
+        with OptionalWandbContext(wandb_enabled, project=PROJECT_NAME, id=wandb_run_id, config=config) as run:                
+            # Perform training
+            best_model_path = f"{model_output_dir}/{model_run_id}.jit"
+            train_results = _train(config, data_loaders, n_epochs, best_model_path, wandb_run=run)
+            best_model = train_results["validation/best_model"]
+            
+            # Upload best model to W&B
+            logging.info(f"Uploading model to W&B: {best_model_path}")
+            run.save(best_model_path)
+            artifact_name = best_model_path.split("/")[-1]
+            artifact = wandb.Artifact(artifact_name, type='model')
+            artifact.add_file(best_model_path)
+            run.log_artifact(artifact)
 
-        # Return training result
-        return {
-            **train_results,
-            "best_model_path": best_model_path
-        }
+            # Evaluate the best model on the test set
+            test_metrics = _evaluate(
+                config, best_model, data_loaders, "test", 
+                log_confusion_matrix=True, 
+                log_misclassifications=True
+            )
+            run.log(test_metrics)     
+
+            # Set the training results
+            results[model_idx] = {
+                **train_results,
+                "best_model_path": best_model_path
+            }
+    
+    # Return training result
+    return results       
 
 """
 Evaluates the model on the specified test set.
 Logs the evaluation results to W&B.
 """
-def evaluate(config, model, data_loaders, loader_type):
+def evaluate(config, model, data_loaders, loader_type, wandb_enabled=False):
     date_s = time.strftime('%Y%m%dT%H%M%S')
     run_id = f"evaluate__{date_s}"
-    with wandb.init(project=PROJECT_NAME, id=run_id): 
+    with OptionalWandbContext(wandb_enabled, project=PROJECT_NAME, id=run_id) as run: 
         metrics = _evaluate(config, model, data_loaders, loader_type)
-        wandb.log(metrics)
+        if wandb_enabled: run.log(metrics)
+        else: logging.info(json.dumps(metrics, indent=4))
         return metrics
+
 def _evaluate(
     config,
     model, 
@@ -1157,12 +1102,14 @@ def main():
     # Parse command line arguments
     parser = argparse.ArgumentParser(description='Train, evaluate, or tune a CNN on MNIST dataset.')
     parser.add_argument('mode', choices=['train', 'eval', 'sweep'], help='Mode to run the script in')
-    parser.add_argument("--dataset", type=str, default="MNIST", help='Dataset to use for training and evaluation')
+    parser.add_argument("--dataset", type=str, default="mnist", help='Dataset to use for training and evaluation')
     parser.add_argument("--seed", type=int, default=42, help="Random seeds to use for training")
     parser.add_argument("--n_epochs", type=int, default=200, help='Number of epochs to train the model for')
-    parser.add_argument("--hyperparams_path", type=str, default="configs/hyperparams/LeNet5Original.yml", help='Path to the hyperparameters file')
-    parser.add_argument("--model_path", type=str, default="outputs/best_model.pth", help='Path to the model file for evaluation')
+    parser.add_argument("--n_models", type=int, default=1, help='How many models to train (eg: train an ensemble)')
+    parser.add_argument("--hyperparams_path", type=str, default="configs/hyperparams/AdvancedCNN.yml", help='Path to the hyperparameters file')
+    parser.add_argument("--model_path", type=str, help='Path to the model file for evaluation')
     parser.add_argument("--model_output_dir", type=str, default="outputs", help='Directory to save the model file')
+    parser.add_argument("--wandb_enabled", type=bool, default=False, help='Whether to enable W&B logging')
     args = parser.parse_args()
 
     # Set the random seed for reproducibility
@@ -1173,12 +1120,12 @@ def main():
     data_loader_config = config['data_loader']
     create_data_loaders_kwargs = {
         **data_loader_config, 
-        "dataset": data_loader_config.get("dataset", args.dataset) # Use command-line dataset if none was specified in the config file
+        "dataset_name": data_loader_config.get("dataset", args.dataset) # Use command-line dataset if none was specified in the config file
     }
     data_loaders = create_data_loaders(config, **create_data_loaders_kwargs)
 
     # Train the model
-    if args.mode == 'train': train(config, data_loaders, args.n_epochs, args.model_output_dir)
+    if args.mode == 'train': train(config, data_loaders, args.n_epochs, args.model_output_dir, n_models=args.n_models)
     elif args.mode == 'eval': evaluate(config, args.model_path, data_loaders, "test")
 
 if __name__ == '__main__':

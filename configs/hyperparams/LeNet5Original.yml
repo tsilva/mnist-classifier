@@ -26,7 +26,3 @@ data_augmentation:
         max_height: 8
         max_width: 8
         p: 0.6
-    - name: Normalize
-      params: {}  # mean and std will be set automatically
-    - name: ToTensorV2
-      params: {}

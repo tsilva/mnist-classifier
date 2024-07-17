@@ -144,7 +144,7 @@ Example configuration (LeNet5.yml):
 
 ```yaml
 data_loader:
-  dataset: "MNIST"
+  dataset: "mnist"
   batch_size: 64
 
 model:
