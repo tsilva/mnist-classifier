@@ -1,35 +1,19 @@
 import argparse
-import os
-from glob import glob
 
 import torch
 import torchvision.transforms as transforms
 from PIL import Image, ImageDraw
 import tkinter as tk
-from datasets import load_dataset, get_dataset_names
+from models import load_model
+from datasets import load_dataset, get_dataset_names, get_dataset_metrics
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-def load_models(model_path):
-    # Check if the path is a directory or a single file
-    if os.path.isdir(model_path):
-        model_files = glob(os.path.join(model_path, "*.jit"))
-    else:
-        model_files = [model_path]
-    
-    # Load and return the models
-    return [torch.jit.load(model_file, map_location=DEVICE).to(DEVICE).eval() for model_file in model_files]
-
-def ensemble_predict(models, input_tensor):
-    # Get predictions from all models
-    outputs = [model(input_tensor) for model in models]
-    avg_output = sum(outputs) / len(outputs)
-    return avg_output.argmax(dim=1, keepdim=True)
-
 class ImageRecognitionGUI:
-    def __init__(self, models, dataset_class):
-        self.models = models
+    def __init__(self, model, dataset_class, dataset_metrics):
+        self.model = model
         self.dataset_class = dataset_class
+        self.dataset_metrics = dataset_metrics
 
         self.setup_gui()
         self.setup_image()
@@ -83,14 +67,23 @@ class ImageRecognitionGUI:
 
         # Convert the image to a PyTorch tensor
         img_tensor = transforms.ToTensor()(img_resized)
+        input_tensor = img_tensor.unsqueeze(0).to(DEVICE)
+
+        # Apply the default transformation to the datasets
+        # (normalize the inputs using the overall mean and standard deviation)
+        dataset_mean = self.dataset_metrics['mean']
+        dataset_std = self.dataset_metrics['std']
+        normalize_transform = transforms.Normalize((dataset_mean,), (dataset_std,))
+        input_tensor = normalize_transform(input_tensor)
 
         # Make the prediction
         with torch.no_grad():
-            input_tensor = img_tensor.unsqueeze(0).to(DEVICE)
-            pred = ensemble_predict(self.models, input_tensor)
-
+            outputs = self.model(input_tensor)
+        
+        prediction = torch.argmax(outputs, dim=1).item()
+    
         # Get the predicted class name and update the label
-        predicted_class = self.dataset_class.classes[pred.item()]
+        predicted_class = self.dataset_class.classes[prediction]
         self.result_label.config(text=f"Predicted Class: {predicted_class}")
 
     def run(self):
@@ -98,15 +91,24 @@ class ImageRecognitionGUI:
         self.root.mainloop()
 
 def main(args):
+    # Load dataste and calculate its metrics
+    dataset = load_dataset(args.dataset)
+
+
     # Load the models
-    models = load_models(args.model_path)
+    model = load_model(args.model_path, DEVICE)
+
+    # Set model in eval mode (disables dropout and batch 
+    # normalization, which would affect the prediction)
+    model.eval()
 
     # Load the dataset
     dataset = load_dataset(args.dataset)
     dataset_class = dataset["dataset_class"]
+    dataset_metrics = get_dataset_metrics(dataset)
 
     # Create and run the GUI
-    gui = ImageRecognitionGUI(models, dataset_class)
+    gui = ImageRecognitionGUI(model, dataset_class, dataset_metrics)
     gui.run()
 
 if __name__ == "__main__":

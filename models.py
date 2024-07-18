@@ -3,26 +3,19 @@ import logging
 import torch
 import torch.nn as nn
 import wandb
+from glob import glob
 
-class EnsembleModel(nn.Module):
 
-    def __init__(self, models):
-        super(EnsembleModel, self).__init__()
-        self.models = nn.ModuleList(models)
-
-    def forward(self, x):
-        outputs = [model(x) for model in self.models]
-        return torch.stack(outputs).mean(dim=0)
-    
-"""
-LeNet-5 original model:
-
-- 2 convolutional layers
-- 3 fully connected layers
-- Average pooling (legacy reasons from the original paper, max pooling would be better)
-- Tanh activation functions (legacy reasons from the original paper, ReLU would be better)
-"""
 class LeNet5Original(nn.Module):
+    """
+    LeNet-5 original model:
+
+    - 2 convolutional layers
+    - 3 fully connected layers
+    - Average pooling (legacy reasons from the original paper, max pooling would be better)
+    - Tanh activation functions (legacy reasons from the original paper, ReLU would be better)
+    """
+
     def __init__(
         self, 
         conv1_filters=6, 
@@ -31,6 +24,7 @@ class LeNet5Original(nn.Module):
         fc1_neurons=84, 
         fc2_neurons=10
     ):
+
         super(LeNet5Original, self).__init__()
 
         # Store the hyperparameters
@@ -106,16 +100,18 @@ class LeNet5Original(nn.Module):
         # Return output with shape (batch_size, fc2_neurons)
         return x
 
-"""
-LeNet-5 model with improvements (based on Kaggle entry `https://www.kaggle.com/code/cdeotte/25-million-images-0-99757-mnist`):
 
-- 6 convolutional layers
-- 2 fully connected layers
-- Batch normalization
-- Dropout
-- ReLU activation functions
-"""
 class LeNet5Improved(nn.Module):
+    """
+    LeNet-5 model with improvements (based on Kaggle entry `https://www.kaggle.com/code/cdeotte/25-million-images-0-99757-mnist`):
+
+    - 6 convolutional layers
+    - 2 fully connected layers
+    - Batch normalization
+    - Dropout
+    - ReLU activation functions
+    """
+
     def __init__(self):
         super(LeNet5Improved, self).__init__()
         
@@ -199,17 +195,18 @@ class LeNet5Improved(nn.Module):
         # Return output with shape (batch_size, 10)
         return x
 
-"""
-Advanced CNN model:
-
-- 7 convolutional layers
-- Different kernel sizes and strides
-- 1 fully connected layer
-- Batch normalization
-- Dropout
-- ReLU activation functions
-"""
 class AdvancedCNN(nn.Module):
+    """
+    Advanced CNN model:
+
+    - 7 convolutional layers
+    - Different kernel sizes and strides
+    - 1 fully connected layer
+    - Batch normalization
+    - Dropout
+    - ReLU activation functions
+    """
+
     def __init__(self):
         super(AdvancedCNN, self).__init__()
             
@@ -297,10 +294,12 @@ class AdvancedCNN(nn.Module):
         # Return output with shape (batch_size, 10)
         return x
         
-"""
-Factory method to build a model based on the specified configuration.
-"""
+
 def build_model(model_config):
+    """
+    Factory method to build a model based on the specified configuration.
+    """
+
     model_id = model_config['id']
     model_params = model_config.get('params', {})
     model_constructor = {
@@ -311,10 +310,12 @@ def build_model(model_config):
     model = model_constructor(**model_params)
     return model
 
-"""
-Initialize weights using the specified initialization mode.
-"""
+
 def init_model_weights(model, mode):
+    """
+    Initialize weights using the specified initialization mode.
+    """
+
     # He initialization
     if mode == 'he':
         for m in model.modules():
@@ -325,37 +326,25 @@ def init_model_weights(model, mode):
                 if m.bias is not None:
                     nn.init.constant_(m.bias, 0)
 
+class EnsembleModel(torch.nn.Module):
+    def __init__(self, models):
+        super().__init__()
+        self.models = torch.nn.ModuleList(models)
+    
+    def forward(self, x):
+        return torch.mean(torch.stack([model(x) for model in self.models]), dim=0)
 
-"""
-Load a model from the specified path.
-If the path is the URL for a W&B run, download associated model artifact.
-"""
-def load_model(model_path):
+def load_model(model_path, device):
+    def _load_model(path):
+        assert os.path.exists(path) and path.endswith('.jit'), f"Invalid model file: {path}"
+        return torch.jit.load(path, map_location=device).to(device).eval()
+
     if model_path.startswith('https://wandb.ai/'):
-        url_tokens = model_path.split('/')
-        entity_id = url_tokens[3]
-        project_name = url_tokens[4]
-        run_id = url_tokens[6]
-        model_file_name = f"best_model_{run_id}.jit"
-        artifact_path = f"{entity_id}/{project_name}/{model_file_name}:latest"
+        entity_id, project_name, run_id = model_path.split('/')[3:6]
+        artifact_path = f"{entity_id}/{project_name}/best_model_{run_id}.jit:latest"
         logging.info(f"Downloading model artifact: {artifact_path}")
-        artifact = wandb.use_artifact(artifact_path, type='model')
-        artifact_dir = artifact.download()
-        model_path = f"{artifact_dir}/{model_file_name}"
-    
-    if model_path.endswith('.jit'): model = torch.jit.load(model_path)
-    elif model_path.endswith('.onnx'): model = torch.onnx.load(model_path)
-    else: raise ValueError(f"Unsupported model file format: {model_path}")
-    return model
+        model_path = f"{wandb.use_artifact(artifact_path, type='model').download()}/best_model_{run_id}.jit"
 
-def load_ensemble(model_path):
-    if os.path.isdir(model_path):
-        models = []
-        for filename in os.listdir(model_path):
-            if filename.endswith('jit') or filename.endswith('.onnx'):
-                full_path = os.path.join(model_path, filename)
-                models.append(load_model(full_path))
-    else:
-        models = [load_model(model_path)]
-    
-    return EnsembleModel(models)
+    model_files = [model_path] if not os.path.isdir(model_path) else glob(os.path.join(model_path, "*.jit"))
+    models = [_load_model(model_file) for model_file in model_files]
+    return models[0] if len(models) == 1 else EnsembleModel(models).to(device)

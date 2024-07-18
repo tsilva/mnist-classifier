@@ -21,13 +21,13 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import torchvision.transforms as transforms
-from torch.utils.data import Subset, DataLoader, random_split
+from torch.utils.data import DataLoader, random_split
 from tqdm import tqdm
 import wandb
 import yaml
 import torch.cuda.amp as amp
-from datasets import load_dataset, get_dataset_metrics, build_albumentations_pipeline, DatasetTransformWrapper
-from models import build_model, init_model_weights, load_ensemble
+from datasets import load_dataset, get_dataset_metrics, build_albumentations_pipeline, DatasetTransformWrapper, create_bootstrap_dataset
+from models import build_model, init_model_weights, load_model
 
 PROJECT_NAME = 'mnist-classifier'
 
@@ -191,23 +191,6 @@ def load_config(hyperparams_path=None):
 
     return config
 
-def create_subset_loader(original_loader, percentage):
-    dataset = original_loader.dataset
-    num_samples = len(dataset)
-    num_subset_samples = int(num_samples * percentage)
-    
-    # Create a list of random indices
-    subset_indices = random.sample(range(num_samples), num_subset_samples)
-    
-    # Create a Subset of the original dataset
-    subset = Subset(dataset, subset_indices)
-    
-    # Create a new DataLoader with the subset
-    subset_loader = DataLoader(subset, batch_size=original_loader.batch_size, 
-                               shuffle=True, num_workers=original_loader.num_workers)
-    
-    return subset_loader
-
 """
 Parse the sweep configuration from W&B to a dictionary.
 Mapping dependent parameters from the flattened structure of the sweep config to the nested structure of our config.
@@ -280,7 +263,7 @@ def _data_loader_worker_init_fn(worker_id):
     worker_seed = (base_seed + worker_id) % 2**32
     set_seed(worker_seed)
 
-def create_data_loaders(config, dataset_name="mnist", batch_size=64, validation_split=0.0):
+def create_data_loaders(config, dataset_name="mnist", batch_size=64, train_bootstrap_percentage=None, validation_split=None):
     # Retrieve config params
     seed = config['seed']
     data_augmentation_config = config.get('data_augmentation', {})
@@ -296,6 +279,13 @@ def create_data_loaders(config, dataset_name="mnist", batch_size=64, validation_
     test_dataset = dataset['test']
     validation_dataset = test_dataset
 
+    # In case a bootstrap percentage was specified then create 
+    # an alternative bootstap dataset (new dataset is created 
+    # through resampling with repetition of original dataset,
+    # useful for creating bagging ensemble models)
+    if train_bootstrap_percentage:
+        train_dataset = create_bootstrap_dataset(train_dataset, train_bootstrap_percentage)
+    
     # In case a validation split was specified then replace 
     # the validation set with a subset of the training set
     if validation_split > 0:
@@ -366,7 +356,7 @@ def create_data_loaders(config, dataset_name="mnist", batch_size=64, validation_
     }
 
 
-def _train(config, data_loaders, n_epochs, best_model_path, train_data_percentage=None, wandb_run=None):
+def _train(config, data_loaders, n_epochs, best_model_path, wandb_run=None):
     # Retrieve hyperparameters from the config
     use_mixed_precision = config["use_mixed_precision"]
     model_config = config['model']
@@ -380,11 +370,6 @@ def _train(config, data_loaders, n_epochs, best_model_path, train_data_percentag
     # Unpack data loaders
     train_loader = data_loaders['train']
 
-    # If a subset of the training data should be used, create a new loader
-    # (eg: this is used for creating bagging ensembles where each model 
-    # is trained on a different subset of the training data)
-    if train_data_percentage: train_loader = create_subset_loader(train_loader, train_data_percentage)
-    
     # Build model
     model = build_model(model_config)
     init_model_weights(model, 'he')
@@ -521,13 +506,22 @@ def _train(config, data_loaders, n_epochs, best_model_path, train_data_percentag
 Train the model for the specified number of epochs.
 Logs the training progress and results to W&B.
 """
-def train(config, data_loaders, n_epochs, model_output_dir, n_models=1, wandb_enabled=False): 
+def train(config, dataset_name, n_epochs, model_output_dir, n_models=1, train_bootstrap_percentage=None, wandb_enabled=False): 
     # Perform training within the context of a W&B run
     model_config = config['model']
     model_id = model_config['id']
 
     # Create the model output dir in case it doesn't exist yet
     if not os.path.exists(model_output_dir): os.makedirs(model_output_dir)
+
+    # Create the data loaders
+    data_loader_config = config['data_loader']
+    create_data_loaders_kwargs = {
+        **data_loader_config, 
+        "dataset_name": data_loader_config.get("dataset", dataset_name),
+        "train_bootstrap_percentage": train_bootstrap_percentage
+    }
+    data_loaders = create_data_loaders(config, **create_data_loaders_kwargs)
 
     # Train the number of specified models
     # (eg: >1 for training ensembles)
@@ -571,7 +565,15 @@ def train(config, data_loaders, n_epochs, model_output_dir, n_models=1, wandb_en
 Evaluates the model on the specified test set.
 Logs the evaluation results to W&B.
 """
-def evaluate(config, model, data_loaders, loader_type, wandb_enabled=False):
+def evaluate(config, dataset_name, model, loader_type, wandb_enabled=False):
+    # Create the data loaders
+    data_loader_config = config['data_loader']
+    create_data_loaders_kwargs = {
+        **data_loader_config, 
+        "dataset_name": data_loader_config.get("dataset", dataset_name)
+    }
+    data_loaders = create_data_loaders(config, **create_data_loaders_kwargs)
+
     date_s = time.strftime('%Y%m%dT%H%M%S')
     run_id = f"evaluate__{date_s}"
     with OptionalWandbContext(wandb_enabled, project=PROJECT_NAME, id=run_id) as run: 
@@ -591,11 +593,8 @@ def _evaluate(
     use_mixed_precision = config["use_mixed_precision"]
 
     # Load the model if a path was provided
-    if isinstance(model, str): model = load_ensemble(model)
-    
-    # Ensure the model is on the correct device
-    model = model.to(DEVICE)
-
+    if isinstance(model, str): model = load_model(model, DEVICE)
+ 
     # Set the model in evaluation mode
     model.eval()
 
@@ -748,6 +747,7 @@ def main():
     parser.add_argument("--seed", type=int, default=42, help="Random seeds to use for training")
     parser.add_argument("--n_epochs", type=int, default=200, help='Number of epochs to train the model for')
     parser.add_argument("--n_models", type=int, default=1, help='How many models to train (eg: train an ensemble)')
+    parser.add_argument("--train_bootstrap_percentage", type=float, help='Percentage of the dataset size for each bootstrap sample (0 < percentage <= 1)')
     parser.add_argument("--hyperparams_path", type=str, default="configs/hyperparams/AdvancedCNN.yml", help='Path to the hyperparameters file')
     parser.add_argument("--model_path", type=str, help='Path to the model file for evaluation')
     parser.add_argument("--model_output_dir", type=str, default="outputs", help='Directory to save the model file')
@@ -759,16 +759,10 @@ def main():
 
     # Create data loaders
     config = load_config(args.hyperparams_path)
-    data_loader_config = config['data_loader']
-    create_data_loaders_kwargs = {
-        **data_loader_config, 
-        "dataset_name": data_loader_config.get("dataset", args.dataset) # Use command-line dataset if none was specified in the config file
-    }
-    data_loaders = create_data_loaders(config, **create_data_loaders_kwargs)
 
     # Train the model
-    if args.mode == 'train': train(config, data_loaders, args.n_epochs, args.model_output_dir, n_models=args.n_models)
-    elif args.mode == 'eval': evaluate(config, args.model_path, data_loaders, "test")
+    if args.mode == 'train': train(config, args.dataset, args.n_epochs, args.model_output_dir, n_models=args.n_models, train_bootstrap_percentage=args.train_bootstrap_percentage, wandb_enabled=args.wandb_enabled)
+    elif args.mode == 'eval': evaluate(config, args.dataset, args.model_path, "test", wandb_enabled=args.wandb_enabled)
 
 if __name__ == '__main__':
     # In case this is being run by a wandb 

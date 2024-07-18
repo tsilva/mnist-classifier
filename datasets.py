@@ -3,7 +3,7 @@ import pandas as pd
 import numpy as np
 import zipfile
 import torch
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, DataLoader, Subset
 from kaggle.api.kaggle_api_extended import KaggleApi
 import zipfile
 import torchvision
@@ -238,3 +238,10 @@ def build_albumentations_pipeline(pipeline_config, mean, std):
         transforms.Normalize((mean,), (std,))
     ])
     return transform
+
+def create_bootstrap_dataset(original_dataset, percentage):
+    num_samples = len(original_dataset)
+    num_subset_samples = int(num_samples * percentage)
+    subset_indices = np.random.choice(range(num_samples), num_subset_samples, replace=True)
+    bootstrap_subset = Subset(original_dataset, subset_indices)
+    return bootstrap_subset
