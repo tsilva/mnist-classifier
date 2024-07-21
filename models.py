@@ -213,11 +213,11 @@ class LeNet5Improved(nn.Module):
 
 # 64 filters 1 layer: 99.35%
 # 64 filters 2 layer: 99.36%
-# 64 filters 3 layer: 
+# 64 filters 3 layer: 99.3%
 
 
 # TODO: keep increasing filters until max reached
-# TODO: check if its easier to train more layers with batch norm
+# TODO: check if its easier to train more layers with batch norm (why is the 3 filter score always lower?)
 
 class MinimalCNN(nn.Module):
     def __init__(self, n_encoder_layers=3, n_decoder_layers=2, out_channels=64):
