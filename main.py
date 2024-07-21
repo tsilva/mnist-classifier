@@ -48,6 +48,17 @@ DEFAULT_CONFIG = {
     "loss_function": {
         "id": "CrossEntropyLoss"
     },
+    "data_augmentation": {
+        "pipeline": [
+            
+        ]
+    }
+}
+
+# TODO: restore augmentations and early stopping
+"""
+
+
     "early_stopping": {
         "id": "EarlyStopping",
         "params": {
@@ -56,9 +67,7 @@ DEFAULT_CONFIG = {
             "verbose": False
         }
     },
-    "data_augmentation": {
-        "pipeline": [
-            {
+{
                 "name": "Rotate",
                 "params": {"limit": 30}
             },
@@ -74,9 +83,7 @@ DEFAULT_CONFIG = {
                 "name": "CoarseDropout",
                 "params": {"max_holes": 1, "max_height": 10, "max_width": 10, "p": 0.5}
             }
-        ]
-    }
-}
+"""
 
 # Retrieve the device to run the models on
 # (use HW acceleration if available, otherwise use CPU)
@@ -98,32 +105,23 @@ def cleanup():
 atexit.register(cleanup)
 
 class EarlyStopping:
+    """
+    Early stopping detector to stop training when the model stops improving.
+    """
 
-    def __init__(self, patience=5, min_delta=0, verbose=False):
+    def __init__(self, patience=5, min_delta=0):
         self.patience = patience
         self.min_delta = min_delta
-        self.verbose = verbose
         self.counter = 0
         self.best_score = None
-        self.early_stop = False
-        self.val_loss_min = np.Inf
+        self.early_stop_triggered = False
 
-    def __call__(self, val_loss):
-        score = -val_loss
-
-        if self.best_score is None:
-            self.best_score = score
-        elif score < self.best_score + self.min_delta:
-            self.counter += 1
-            if self.verbose:
-                logging.debug(f'EarlyStopping counter: {self.counter} out of {self.patience}')
-            if self.counter >= self.patience:
-                self.early_stop = True
-        else:
-            self.best_score = score
-            self.counter = 0
-
-        return self.early_stop
+    def __call__(self, score):
+        assert self.early_stop_triggered == False, "Early stopping is already triggered"
+        best_score_threshold = self.best_score + self.min_delta
+        if self.best_score is None or score >= best_score_threshold: self.best_score, self.counter = score, 0
+        else: self.early_stop_triggered, self.counter = self.counter >= self.patience, self.counter + 1
+        return self.early_stop_triggered, self.best_score, self.counter, self.patience
 
 class OptionalWandbContext:
 
@@ -163,10 +161,11 @@ class OptionalWandbContext:
         if self.use_wandb and self.run:
             self.run.log_artifact(*args, **kwargs)
     
-"""
-Set a seed in the random number generators for reproducibility.
-"""
 def set_seed(seed):
+    """
+    Set a seed in the random number generators for reproducibility.
+    """
+
     random.seed(seed) # Set the seed for the random number generator
     np.random.seed(seed) # Set the seed for NumPy
     torch.manual_seed(seed) # Set the seed for PyTorch
@@ -175,11 +174,11 @@ def set_seed(seed):
     torch.backends.cudnn.deterministic = True # Ensure deterministic results (WARNING: can slow down training!)
     torch.backends.cudnn.benchmark = False # Disable cuDNN benchmarking (WARNING: can slow down training!)
 
-
-"""
-Returns the default configuration merged with the specified hyperparameters.
-"""
 def load_config(hyperparams_path=None):
+    """
+    Returns the default configuration merged with the specified hyperparameters.
+    """
+
     # Load hyperparameters from the specified file (if provided)
     hyperparams = {}
     if hyperparams_path:
@@ -191,11 +190,13 @@ def load_config(hyperparams_path=None):
 
     return config
 
-"""
-Parse the sweep configuration from W&B to a dictionary.
-Mapping dependent parameters from the flattened structure of the sweep config to the nested structure of our config.
-"""
+
 def parse_wandb_sweep_config(sweep_config):
+    """
+    Parse the sweep configuration from W&B to a dictionary.
+    Mapping dependent parameters from the flattened structure of the sweep config to the nested structure of our config.
+    """
+
     config = {}
     for key, value in sweep_config.items():
         if key == "method": continue
@@ -209,10 +210,12 @@ def parse_wandb_sweep_config(sweep_config):
         config[key] = value
     return config
 
-"""
-Factory method to build an optimizer based on the specified configuration.
-"""
+
 def build_optimizer(model, optimizer_config):
+    """
+    Factory method to build an optimizer based on the specified configuration.
+    """
+
     optimizer_id = optimizer_config['id']
     optimizer_params = optimizer_config.get('params', {})
     optimizer = {
@@ -222,25 +225,30 @@ def build_optimizer(model, optimizer_config):
     }[optimizer_id](model.parameters(), **optimizer_params)
     return optimizer
 
-"""
-Factory method to build a learning rate scheduler based on the specified configuration.
-"""
+
 def build_lr_scheduler(optimizer, scheduler_config):
+    """
+    Factory method to build a learning rate scheduler based on the specified configuration.
+    """
+
     if not scheduler_config: return None
     scheduler_id = scheduler_config['id']
     scheduler_params = scheduler_config.get('params', {})
     scheduler = {
         "StepLR": optim.lr_scheduler.StepLR,
+        "CyclicLR": optim.lr_scheduler.CyclicLR,
         "ReduceLROnPlateau": optim.lr_scheduler.ReduceLROnPlateau,
         "CosineAnnealingLR": optim.lr_scheduler.CosineAnnealingLR,
         "OneCycleLR": optim.lr_scheduler.OneCycleLR
     }[scheduler_id](optimizer, **scheduler_params)
     return scheduler
 
-"""
-Factory method to build a loss function based on the specified configuration.
-"""
+
 def build_loss_function(loss_function_config):
+    """
+    Factory method to build a loss function based on the specified configuration.
+    """
+
     loss_function_id = loss_function_config['id']
     loss_function_params = loss_function_config.get('params', {})
     loss_function = {
@@ -372,7 +380,7 @@ def _train(config, data_loaders, n_epochs, best_model_path, wandb_run=None):
 
     # Build model
     model = build_model(model_config)
-    init_model_weights(model, 'he')
+    # init_model_weights(model, 'he') # TODO: not seeing much benefit from 'he' init so disabling for now
     model = model.to(DEVICE)
 
     # Build optimizer, loss function, and learning rate scheduler
@@ -458,6 +466,21 @@ def _train(config, data_loaders, n_epochs, best_model_path, wandb_run=None):
             best_model.save(best_model_path)
             logging.debug(f'Saved best model with accuracy: {best_validation_accuracy:.2f}%')
 
+        # Update the learning rate based on current validation loss
+        if lr_scheduler: 
+            lr_scheduler.step(validation_loss)
+
+        # In case early stopping is enabled then 
+        # check if we should stop training
+        score = -validation_loss
+        early_stop_triggered, early_stop_best_score, early_stop_counter, early_stop_patience = early_stopping(score) if early_stopping else (False, None, None, None)
+        early_stopping_metrics = {
+            "early_stopping/best_score": early_stop_best_score, 
+            "early_stopping/counter": early_stop_counter, 
+            "early_stopping/patience": early_stop_patience,
+            "early_stopping/patience_percentage": round(early_stop_counter / early_stop_patience, 2) if early_stop_patience else 0
+        } if early_stopping else {}
+
         # Create metrics
         learning_rate = lr_scheduler.get_last_lr()[0] if lr_scheduler else None
         metrics = {
@@ -466,7 +489,9 @@ def _train(config, data_loaders, n_epochs, best_model_path, wandb_run=None):
             "train/batches/total_load_time": total_batch_load_time,
             "train/batches/average_load_time": average_batch_load_time,
             "validation/best_accuracy": best_validation_accuracy,
-            **validation_metrics
+            "validation/best_epoch": best_epoch,
+            **validation_metrics,
+            **early_stopping_metrics
         }
         if learning_rate: metrics["train/learning_rate"] = learning_rate
 
@@ -482,18 +507,15 @@ def _train(config, data_loaders, n_epochs, best_model_path, wandb_run=None):
                 "train/learning_rate" : learning_rate,
                 "validation/loss" : validation_loss,
                 "validation/accuracy" : validation_accuracy,
+                "validation/best_epoch" : best_epoch,
                 "validation/best_accuracy" : best_validation_accuracy
             }, indent=4))
 
-        # Update the learning rate based on current validation loss
-        if lr_scheduler: 
-            lr_scheduler.step(validation_loss)
-
-        # Check if we should stop early
-        if early_stopping and early_stopping(validation_loss):
+        # In case early stopping was triggered then stop training
+        if early_stop_triggered:
             logging.info(f"Early stopping triggered at epoch {epoch}")
             break
-        
+
     # Return training results
     return {
         "train/last_epoch": epoch,
@@ -502,11 +524,13 @@ def _train(config, data_loaders, n_epochs, best_model_path, wandb_run=None):
         "validation/best_model": best_model
     }
 
-"""
-Train the model for the specified number of epochs.
-Logs the training progress and results to W&B.
-"""
+
 def train(config, dataset_name, n_epochs, model_output_dir, n_models=1, train_bootstrap_percentage=None, wandb_enabled=False): 
+    """
+    Train the model for the specified number of epochs.
+    Logs the training progress and results to W&B.
+    """
+
     # Perform training within the context of a W&B run
     model_config = config['model']
     model_id = model_config['id']
@@ -526,9 +550,10 @@ def train(config, dataset_name, n_epochs, model_output_dir, n_models=1, train_bo
     # Train the number of specified models
     # (eg: >1 for training ensembles)
     results = {}
+    datetime_s = time.strftime('%Y%m%dT%H%M%S')
     for model_idx in range(n_models):
-        if n_models > 1: model_run_id = f"{model_id}__{time.strftime('%Y%m%d')}__{model_idx}"
-        else: model_run_id = f"{model_id}__{time.strftime('%Y%m%dT%H%M%S')}"
+        if n_models > 1: model_run_id = f"{model_id}__{datetime_s}__{model_idx}"
+        else: model_run_id = f"{model_id}__{datetime_s}"
         wandb_run_id = f"train__{model_run_id}"
         with OptionalWandbContext(wandb_enabled, project=PROJECT_NAME, id=wandb_run_id, config=config) as run:                
             # Perform training
@@ -561,11 +586,12 @@ def train(config, dataset_name, n_epochs, model_output_dir, n_models=1, train_bo
     # Return training result
     return results       
 
-"""
-Evaluates the model on the specified test set.
-Logs the evaluation results to W&B.
-"""
 def evaluate(config, dataset_name, model, loader_type, wandb_enabled=False):
+    """
+    Evaluates the model on the specified test set.
+    Logs the evaluation results to W&B.
+    """
+
     # Create the data loaders
     data_loader_config = config['data_loader']
     create_data_loaders_kwargs = {
@@ -704,10 +730,11 @@ def _evaluate(
     # Return metrics
     return metrics
 
-"""
-Perform a hyperparameter sweep using W&B.
-"""
 def sweep(seeds=[42]):        
+    """
+    Perform a hyperparameter sweep using W&B.
+    """
+
     data_loader_config = config['data_loader']
 
     # Perform training within the context of the sweep
@@ -735,11 +762,13 @@ def sweep(seeds=[42]):
         # Log the score to be maximized by the sweep
         wandb.log({"score": score})
 
-"""
-Main function to parse command line arguments and run the script.
-Runs by default when script is not being executed by a W&B sweep agent.
-"""
+
 def main():
+    """
+    Main function to parse command line arguments and run the script.
+    Runs by default when script is not being executed by a W&B sweep agent.
+    """
+
     # Parse command line arguments
     parser = argparse.ArgumentParser(description='Train, evaluate, or tune a CNN on MNIST dataset.')
     parser.add_argument('mode', choices=['train', 'eval', 'sweep'], help='Mode to run the script in')
@@ -748,10 +777,10 @@ def main():
     parser.add_argument("--n_epochs", type=int, default=200, help='Number of epochs to train the model for')
     parser.add_argument("--n_models", type=int, default=1, help='How many models to train (eg: train an ensemble)')
     parser.add_argument("--train_bootstrap_percentage", type=float, help='Percentage of the dataset size for each bootstrap sample (0 < percentage <= 1)')
-    parser.add_argument("--hyperparams_path", type=str, default="configs/hyperparams/AdvancedCNN.yml", help='Path to the hyperparameters file')
+    parser.add_argument("--hyperparams_path", type=str, default="configs/hyperparams/MinimalCNN.yml", help='Path to the hyperparameters file')
     parser.add_argument("--model_path", type=str, help='Path to the model file for evaluation')
     parser.add_argument("--model_output_dir", type=str, default="outputs", help='Directory to save the model file')
-    parser.add_argument("--wandb_enabled", type=bool, default=False, help='Whether to enable W&B logging')
+    parser.add_argument("--wandb_enabled", type=bool, default=True, help='Whether to enable W&B logging')
     args = parser.parse_args()
 
     # Set the random seed for reproducibility

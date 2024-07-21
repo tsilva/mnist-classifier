@@ -133,7 +133,7 @@ The following table shows the test set accuracy achieved for each model on each 
 |------------------------------------|---------|--------------| ------ | ------ | ------------- |
 | LeNet5                             | 97.05%  | N/A          | N/A    | N/A    | N/A           |
 | LeNet5Improved                     | 99.55%  | N/A          | N/A    | N/A    | N/A           |
-| Advanced CNN                       | 99.56%  | N/A          | N/A    | N/A    | N/A           |
+| Advanced CNN                       | 99.58%  | N/A          | N/A    | N/A    | N/A           |
 | Weighted Averaging Ensemble        | 99.59%  | N/A          | N/A    | N/A    | N/A           |
 
 ## Configuration

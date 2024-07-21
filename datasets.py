@@ -27,7 +27,7 @@ class DatasetTransformWrapper(Dataset):
         img, label = self.dataset[idx]
         if self.transform: img = self.transform(img)
         return img, label
-    
+
 class KaggleDigitRecognizer(Dataset):
     base_folder = 'digit-recognizer'
     kaggle_competition = 'digit-recognizer'
@@ -68,6 +68,8 @@ class KaggleDigitRecognizer(Dataset):
 
     def __getitem__(self, index):
         img, target = self.data[index], self.targets[index]
+
+        target = target.item()
 
         if self.transform is not None:
             img = self.transform(img)
@@ -138,6 +140,7 @@ def load_dataset(dataset_name, dataset_root='./data'):
     dataset_class = DATASETS[dataset_name]
     train_dataset = dataset_class(root=dataset_root, train=True, download=True, transform=transforms.ToTensor())
     test_dataset = dataset_class(root=dataset_root, train=False, download=True, transform=transforms.ToTensor())
+    
     dataset = {
         "dataset_class" : dataset_class, 
         "train": train_dataset, 
@@ -234,7 +237,7 @@ def build_albumentations_pipeline(pipeline_config, mean, std):
         a_pipeline.append(getattr(A, name)(**params))
     a_pipeline.append(ToTensorV2())
     transform = transforms.Compose([
-        AlbumentationsToTorchvisionWrapper(A.Compose(a_pipeline)), 
+        AlbumentationsToTorchvisionWrapper(A.Compose(a_pipeline)),
         transforms.Normalize((mean,), (std,))
     ])
     return transform

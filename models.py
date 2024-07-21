@@ -195,6 +195,82 @@ class LeNet5Improved(nn.Module):
         # Return output with shape (batch_size, 10)
         return x
 
+# 8 filters, 1 layer, 1 decoder layer: 98.51%
+# 8 filters, 2 layer, 1 decoder layer: 98.98%
+# 8 filters, 3 layer, 1 decoder layer: 98.60%
+
+# 8 filters, 1 layer, 2 decoder layers: 99.01%
+# 8 filters, 1 layer, 2 decoder layers: 99.26%
+# 8 filters, 1 layer, 2 decoder layers: 98.60%
+
+# 16 filters 1 layer: 99.02%
+# 16 filters 2 layer: 99.37%
+# 16 filters 3 layer: 99.05%
+
+# 32 filters 1 layer: 98.97%
+# 32 filters 2 layer: 99.42%
+# 32 filters 3 layer: 99.18%
+
+# 64 filters 1 layer: 99.35%
+# 64 filters 2 layer: 99.36%
+# 64 filters 3 layer: 
+
+
+# TODO: keep increasing filters until max reached
+# TODO: check if its easier to train more layers with batch norm
+
+class MinimalCNN(nn.Module):
+    def __init__(self, n_encoder_layers=3, n_decoder_layers=2, out_channels=64):
+        super(MinimalCNN, self).__init__()
+        self.n_encoder_layers = n_encoder_layers
+        self.n_decoder_layers = n_decoder_layers
+        
+        encoder_layers = []
+        in_channels = 1
+
+        for _ in range(n_encoder_layers):
+            encoder_layers.append(nn.Conv2d(in_channels, out_channels, kernel_size=3))
+            encoder_layers.append(nn.ReLU())
+            encoder_layers.append(nn.MaxPool2d(kernel_size=2, stride=2))
+            #encoder_layers.append(nn.BatchNorm2d(out_channels))
+            in_channels = out_channels
+            out_channels *= 2
+
+        self.encoder = nn.Sequential(*encoder_layers)
+
+        # Calculate the size of the output from the final MaxPool2d layer
+        final_conv_size = self._compute_final_conv_size()
+
+        decoder_layers = []
+        in_features = final_conv_size * final_conv_size * in_channels
+
+        for i in range(n_decoder_layers - 1):
+            out_features = max(in_features // 2, 10)  # Ensure the number of neurons decreases and does not fall below 10
+            decoder_layers.append(nn.Linear(in_features, out_features))
+            decoder_layers.append(nn.ReLU())
+            in_features = out_features
+
+        # Final layer for classification
+        decoder_layers.append(nn.Linear(in_features, 10))
+
+        self.decoder = nn.Sequential(*decoder_layers)
+
+    def _compute_final_conv_size(self):
+        size = 28
+        for _ in range(self.n_encoder_layers):
+            size = (size - 2) // 2  # Each Conv2d reduces size by 2, each MaxPool2d reduces size by half
+        return size
+
+    def forward(self, x):
+        # Pass through the encoder
+        x = self.encoder(x)
+        # Flatten the output for the classifier
+        x = x.view(x.size(0), -1)
+        # Pass through the classifier
+        x = self.decoder(x)
+        # Return output with shape (batch_size, 10)
+        return x
+
 class AdvancedCNN(nn.Module):
     """
     Advanced CNN model:
@@ -303,6 +379,7 @@ def build_model(model_config):
     model_id = model_config['id']
     model_params = model_config.get('params', {})
     model_constructor = {
+        "MinimalCNN": MinimalCNN, # TODO: remove this
         "LeNet5Original": LeNet5Original,
         "LeNet5Improved": LeNet5Improved,
         "AdvancedCNN": AdvancedCNN
@@ -320,9 +397,9 @@ def init_model_weights(model, mode):
     if mode == 'he':
         for m in model.modules():
             if isinstance(m, nn.Conv2d):
-                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+                nn.init.kaiming_normal_(m.weight, mode='fan_in', nonlinearity='relu')
             elif isinstance(m, nn.Linear):
-                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+                nn.init.kaiming_normal_(m.weight, mode='fan_in', nonlinearity='relu')
                 if m.bias is not None:
                     nn.init.constant_(m.bias, 0)
 
