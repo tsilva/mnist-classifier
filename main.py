@@ -13,6 +13,7 @@ import random
 import sys
 import time
 
+from deepmerge import Merger
 import matplotlib.pyplot as plt
 import numpy as np
 import seaborn as sns
@@ -30,60 +31,6 @@ from datasets import load_dataset, get_dataset_metrics, build_albumentations_pip
 from models import build_model, load_model
 
 PROJECT_NAME = 'mnist-classifier'
-
-# Define the default configuration for the model
-DEFAULT_CONFIG = {
-    "seed": 42,
-    "use_mixed_precision": False,
-    "logging": {
-        "interval": 1
-    },
-    "data_loader": {
-        "batch_size": 64,
-        "validation_split": 0.0
-    },
-    "optimizer": {
-        "id": "Adam"
-    },
-    "loss_function": {
-        "id": "CrossEntropyLoss"
-    },
-    "data_augmentation": {
-        "pipeline": [
-            
-        ]
-    }
-}
-
-# TODO: restore augmentations and early stopping
-"""
-
-
-    "early_stopping": {
-        "id": "EarlyStopping",
-        "params": {
-            "patience": 20,
-            "min_delta": 0.0001,
-            "verbose": False
-        }
-    },
-{
-                "name": "Rotate",
-                "params": {"limit": 30}
-            },
-            {
-                "name": "RandomResizedCrop",
-                "params": {"height": 28, "width": 28, "scale": [0.8, 1.0]}
-            },
-            {
-                "name": "GridDistortion",
-                "params": {"num_steps": 5, "distort_limit": 0.3, "p": 0.5}
-            },
-            {
-                "name": "CoarseDropout",
-                "params": {"max_holes": 1, "max_height": 10, "max_width": 10, "p": 0.5}
-            }
-"""
 
 # Retrieve the device to run the models on
 # (use HW acceleration if available, otherwise use CPU)
@@ -103,6 +50,13 @@ if str(DEVICE) == "cpu":
 def cleanup():
     if wandb.run: wandb.finish()
 atexit.register(cleanup)
+
+class CustomJSONEncoder(json.JSONEncoder):
+    def default(self, obj):
+        try:
+            return json.JSONEncoder.default(self, obj)
+        except (TypeError, OverflowError):
+            return None  # Or some other placeh
 
 class CustomDataLoader(DataLoader):
     def __init__(self, *args, device=None, **kwargs):
@@ -164,7 +118,7 @@ class CustomDataLoader(DataLoader):
         }
         return stats
         
-class EarlyStopping:
+class BasicPatienceEarlyStopping:
     """
     Early stopping detector to stop training when the model stops improving.
     """
@@ -178,7 +132,7 @@ class EarlyStopping:
 
     def __call__(self, score):
         assert self.early_stop_triggered == False, "Early stopping is already triggered"
-        best_score_threshold = self.best_score + self.min_delta
+        best_score_threshold = self.best_score + self.min_delta if self.best_score is not None else None
         if self.best_score is None or score >= best_score_threshold: self.best_score, self.counter = score, 0
         else: self.early_stop_triggered, self.counter = self.counter >= self.patience, self.counter + 1
         return self.early_stop_triggered, self.best_score, self.counter, self.patience
@@ -234,20 +188,62 @@ def set_seed(seed):
     torch.backends.cudnn.deterministic = True # Ensure deterministic results (WARNING: can slow down training!)
     torch.backends.cudnn.benchmark = False # Disable cuDNN benchmarking (WARNING: can slow down training!)
 
-def load_config(hyperparams_path=None):
+def load_config(config_path, extra_config={}):
     """
-    Returns the default configuration merged with the specified hyperparameters.
+    Creates the configuration data structure by merging configuration data from multiple sources.
+    The configuration data holds all parameters that will have an impact on the training process
+    (eg: model output dir is not part of the config because it doesn't affect the training process).
     """
 
-    # Load hyperparameters from the specified file (if provided)
-    hyperparams = {}
-    if hyperparams_path:
-        with open(hyperparams_path, 'r') as file:
-            hyperparams = yaml.safe_load(file)
+    config_root = "configs/train/" # TODO: move to constant
+    assert config_path.startswith(config_root), f"config path must start with {config_root}"
+    assert not config_path.endswith("_default.yml"), "config path must not end with _default.yml"
 
-    # Merge the hyperparameters with the default configuration
-    config = {**DEFAULT_CONFIG, **hyperparams}
+    config_id = config_path.replace(config_root, "").replace(".yml", "")
+    config_id = config_id.replace("/", "__")
 
+    def _collect_default_configs(path):
+        """
+        Collect all _default.yml files from the specified path up to the configs/train/ directory.
+        """
+        default_configs = [{"id": config_id}]
+        while path and os.path.dirname(path) != path:
+            default_config_path = os.path.join(path, "_default.yml")
+            if os.path.exists(default_config_path):
+                with open(default_config_path, "r", encoding="utf-8") as file:
+                    default_configs.append(yaml.safe_load(file))
+            if path.endswith(config_root):
+                break
+            path = os.path.dirname(path)
+        return default_configs
+
+    # Define the merger object with custom strategies using a lambda function
+    merger = Merger(
+        [
+            (list, lambda config, path, base, nxt: nxt), 
+            (dict, "merge") # Merge dictionaries
+        ],  
+        # List merge strategy using a lambda
+        ["override"], # Default strategies for other types
+        ["override"]  # Default conflict resolution strategy
+    )
+
+    # Merge all default configurations
+    config_dir = os.path.dirname(config_path)
+    default_configs = list(reversed(_collect_default_configs(config_dir)))
+    
+    merged_default_config = {}
+    for default_config in default_configs:
+        merged_default_config = merger.merge(merged_default_config, default_config)
+
+    # Load the specified configuration
+    with open(config_path, "r", encoding="utf-8") as file:
+        file_config = yaml.safe_load(file)
+
+    # Merge the configurations
+    config = merger.merge(merged_default_config, file_config)
+    config = merger.merge(config, extra_config)
+    
     return config
 
 
@@ -321,7 +317,7 @@ def build_early_stopping(early_stopping_config):
     early_stopping_id = early_stopping_config['id']
     early_stopping_params = early_stopping_config.get('params', {})
     early_stopping = {
-        "EarlyStopping": EarlyStopping
+        "BasicPatienceEarlyStopping": BasicPatienceEarlyStopping
     }[early_stopping_id](**early_stopping_params)
     return early_stopping
 
@@ -331,14 +327,14 @@ def _data_loader_worker_init_fn(worker_id):
     worker_seed = (base_seed + worker_id) % 2**32
     set_seed(worker_seed)
 
-def create_data_loaders(config, dataset_name="mnist", batch_size=64, train_bootstrap_percentage=None, validation_split=None):
+def create_data_loaders(config, dataset_id="mnist", batch_size=64, train_bootstrap_percentage=None, validation_split=None):
     # Retrieve config params
     seed = config['seed']
     data_augmentation_config = config.get('data_augmentation', {})
     data_augmentation_pipeline_config = data_augmentation_config.get('pipeline', [])
 
     # Load dataste and calculate its metrics
-    dataset = load_dataset(dataset_name)
+    dataset = load_dataset(dataset_id)
     dataset_metrics = get_dataset_metrics(dataset)
     logging.info("Dataset metrics:" + json.dumps(dataset_metrics, indent=2))
 
@@ -443,6 +439,7 @@ def _train(config, data_loaders, n_epochs, best_model_path, wandb_run=None):
 
     # Build model
     model = build_model(model_config)
+
     # init_model_weights(model, 'he') # TODO: not seeing much benefit from 'he' init so disabling for now
     model = model.to(DEVICE)
 
@@ -469,6 +466,7 @@ def _train(config, data_loaders, n_epochs, best_model_path, wandb_run=None):
         running_loss = 0.0
         correct = 0
         total = 0
+        save_best_model_meta_path = None
 
         for images, labels in train_loader:
             if use_mixed_precision:
@@ -514,7 +512,8 @@ def _train(config, data_loaders, n_epochs, best_model_path, wandb_run=None):
         validation_loss = validation_metrics["validation/loss"]
 
         # If the model is the best so far, save it to disk
-        if validation_accuracy > best_validation_accuracy:
+        is_best_model = validation_accuracy > best_validation_accuracy
+        if is_best_model:
             best_validation_accuracy = validation_accuracy
             best_epoch = epoch
             best_model = torch.jit.script(model)
@@ -550,8 +549,17 @@ def _train(config, data_loaders, n_epochs, best_model_path, wandb_run=None):
             **early_stopping_metrics
         }
         if learning_rate: metrics["train/learning_rate"] = learning_rate
-        
-        
+
+        # In case this is the best model then save the metrics
+        # to a separate file (eg: restore pre-processing pipeline; review metrics, etc.)
+        if is_best_model:
+            best_model_meta_path = best_model_path.replace(".jit", ".json")
+            with open(best_model_meta_path, "w", encoding="utf-8") as file:
+                file.write(json.dumps({
+                    "config": config,
+                    "metrics": metrics
+                }, cls=CustomJSONEncoder, indent=4))
+
         # Log metrics to W&B
         if wandb_run: wandb_run.log(metrics, step=epoch)
 
@@ -583,15 +591,22 @@ def _train(config, data_loaders, n_epochs, best_model_path, wandb_run=None):
     }
 
 
-def train(config, dataset_name, n_epochs, model_output_dir, n_models=1, train_bootstrap_percentage=None, wandb_enabled=False): 
+def train(config, model_output_dir, n_models=1, wandb_enabled=False): 
     """
     Train the model for the specified number of epochs.
     Logs the training progress and results to W&B.
     """
 
     # Perform training within the context of a W&B run
-    model_config = config['model']
-    model_id = model_config['id']
+    config_id = config["id"]
+    seed = config["seed"]
+    n_epochs = config["n_epochs"]
+    dataset_config = config["dataset"]
+    dataset_id = dataset_config["id"]
+    train_bootstrap_percentage = dataset_config["train"]["bootstrap_percentage"]
+
+    # Set the random seed for reproducibility
+    set_seed(seed)
 
     # Create the model output dir in case it doesn't exist yet
     if not os.path.exists(model_output_dir): os.makedirs(model_output_dir)
@@ -600,7 +615,7 @@ def train(config, dataset_name, n_epochs, model_output_dir, n_models=1, train_bo
     data_loader_config = config['data_loader']
     create_data_loaders_kwargs = {
         **data_loader_config, 
-        "dataset_name": data_loader_config.get("dataset", dataset_name),
+        "dataset_id": data_loader_config.get("dataset", dataset_id),
         "train_bootstrap_percentage": train_bootstrap_percentage
     }
     data_loaders = create_data_loaders(config, **create_data_loaders_kwargs)
@@ -610,8 +625,8 @@ def train(config, dataset_name, n_epochs, model_output_dir, n_models=1, train_bo
     results = {}
     datetime_s = time.strftime('%Y%m%dT%H%M%S')
     for model_idx in range(n_models):
-        if n_models > 1: model_run_id = f"{model_id}__{datetime_s}__{model_idx}"
-        else: model_run_id = f"{model_id}__{datetime_s}"
+        if n_models > 1: model_run_id = f"{config_id}__{datetime_s}__{model_idx}"
+        else: model_run_id = f"{config_id}__{datetime_s}"
         wandb_run_id = f"train__{model_run_id}"
         with OptionalWandbContext(wandb_enabled, project=PROJECT_NAME, id=wandb_run_id, config=config) as run:                
             # Perform training
@@ -644,17 +659,23 @@ def train(config, dataset_name, n_epochs, model_output_dir, n_models=1, train_bo
     # Return training result
     return results       
 
-def evaluate(config, dataset_name, model, loader_type, wandb_enabled=False):
+def evaluate(config, model, loader_type, wandb_enabled=False):
     """
     Evaluates the model on the specified test set.
     Logs the evaluation results to W&B.
     """
 
+    seed = config["seed"]
+    dataset_id = config["dataset"]["id"]
+    data_loader_config = config["data_loader"]
+
+    # Set the random seed for reproducibility
+    set_seed(seed)
+
     # Create the data loaders
-    data_loader_config = config['data_loader']
     create_data_loaders_kwargs = {
         **data_loader_config, 
-        "dataset_name": data_loader_config.get("dataset", dataset_name)
+        "dataset_id": data_loader_config.get("dataset", dataset_id)
     }
     data_loaders = create_data_loaders(config, **create_data_loaders_kwargs)
 
@@ -823,22 +844,28 @@ def main():
     parser.add_argument("--seed", type=int, default=42, help="Random seeds to use for training")
     parser.add_argument("--n_epochs", type=int, default=200, help='Number of epochs to train the model for')
     parser.add_argument("--n_models", type=int, default=1, help='How many models to train (eg: train an ensemble)')
-    parser.add_argument("--train_bootstrap_percentage", type=float, help='Percentage of the dataset size for each bootstrap sample (0 < percentage <= 1)')
-    parser.add_argument("--hyperparams_path", type=str, default="configs/hyperparams/MLP.yml", help='Path to the hyperparameters file')
+    parser.add_argument("--train_bootstrap_percentage", type=float, default=0, help='Percentage of the dataset size for each bootstrap sample (0 < percentage <= 1)')
+    parser.add_argument("--config_path", type=str, default="configs/train/MLP.yml", help='Path to the training config file') # TODO: also used in eval
     parser.add_argument("--model_path", type=str, help='Path to the model file for evaluation')
     parser.add_argument("--model_output_dir", type=str, default="outputs", help='Directory to save the model file')
     parser.add_argument("--wandb_enabled", type=bool, default=False, help='Whether to enable W&B logging')
     args = parser.parse_args()
 
-    # Set the random seed for reproducibility
-    set_seed(args.seed)
-
-    # Create data loaders
-    config = load_config(args.hyperparams_path)
-
+    # Load the configuration
+    config = load_config(args.config_path, {
+        "seed": args.seed,
+        "n_epochs": args.n_epochs,
+        "dataset": {
+            "id": args.dataset,
+            "train": {
+                "bootstrap_percentage" : args.train_bootstrap_percentage
+            }
+        }
+    })
+    
     # Train the model
-    if args.mode == 'train': train(config, args.dataset, args.n_epochs, args.model_output_dir, n_models=args.n_models, train_bootstrap_percentage=args.train_bootstrap_percentage, wandb_enabled=args.wandb_enabled)
-    elif args.mode == 'eval': evaluate(config, args.dataset, args.model_path, "test", wandb_enabled=args.wandb_enabled)
+    if args.mode == 'train': train(config, args.model_output_dir, n_models=args.n_models, wandb_enabled=args.wandb_enabled)
+    elif args.mode == 'eval': evaluate(config, args.model_path, "test", wandb_enabled=args.wandb_enabled)
 
 if __name__ == '__main__':
     # In case this is being run by a wandb 

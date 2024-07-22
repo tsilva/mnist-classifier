@@ -1,0 +1,25 @@
+early_stopping:
+  id: BasicPatienceEarlyStopping
+  patience: 20
+  min_delta: 0.0001
+data_augmentation:
+  pipeline:
+    - name: Rotate
+      params:
+        limit: 30
+    - name: RandomResizedCrop
+      params:
+        height: 28
+        width: 28
+        scale: [0.8, 1.0]
+    - name: GridDistortion
+      params:
+        num_steps: 5
+        distort_limit: 0.3
+        p: 0.5
+    - name: CoarseDropout
+      params:
+        max_holes: 1
+        max_height: 10
+        max_width: 10
+        p: 0.5

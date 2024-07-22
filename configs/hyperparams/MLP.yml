@@ -1,4 +1,0 @@
-model:
-  id: MLP
-lr_scheduler:
-  id: ReduceLROnPlateau

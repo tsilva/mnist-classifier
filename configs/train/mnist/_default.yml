@@ -1,0 +1,20 @@
+seed: 42
+use_mixed_precision: false
+n_epochs: 50
+logging:
+  interval: 1
+dataset:
+  id: mnist
+  train:
+    bootstrap_percentage: 0
+model:
+  id: MLP
+lr_scheduler:
+  id: ReduceLROnPlateau
+data_loader:
+  batch_size: 64
+  validation_split: 0.0
+optimizer:
+  id: Adam
+loss_function:
+  id: CrossEntropyLoss

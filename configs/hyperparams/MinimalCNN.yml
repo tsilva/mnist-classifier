@@ -1,4 +1,0 @@
-model:
-  id: MinimalCNN
-lr_scheduler:
-  id: ReduceLROnPlateau
