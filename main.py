@@ -9,7 +9,6 @@ import argparse
 import atexit
 import logging
 import json
-import random
 import sys
 import time
 
@@ -20,174 +19,37 @@ import seaborn as sns
 from sklearn.metrics import confusion_matrix, f1_score, precision_score, recall_score
 import torch
 import torch.nn as nn
-import torch.optim as optim
-import torchvision.transforms as transforms
-from torch.utils.data import DataLoader, random_split
 from tqdm import tqdm
 import wandb
 import yaml
 import torch.cuda.amp as amp
-from datasets import load_dataset, get_dataset_metrics, build_albumentations_pipeline, DatasetTransformWrapper, create_bootstrap_dataset
-from models import build_model, load_model
 
-PROJECT_NAME = 'mnist-classifier'
-
-# Retrieve the device to run the models on
-# (use HW acceleration if available, otherwise use CPU)
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+from libs.misc import CustomJSONEncoder, set_seed, get_device
+from libs.models import build_model, load_model
+from libs.data_loaders import create_data_loaders
+from libs.loss_functions import build_loss_function
+from libs.optimizers import build_optimizer
+from libs.lr_schedulers import build_lr_scheduler
+from libs.early_stopping import build_early_stopping
+from libs.wandb_utils import parse_wandb_sweep_config, OptionalWandbContext
 
 # Setup logger
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# Make sure the user is aware if HW acceleration is not available
-logger.info(f"Using device: {DEVICE}")
-if str(DEVICE) == "cpu":
-    logging.warning("CUDA is not available. Running on CPU. Press Enter to continue...")
-    input()
+PROJECT_NAME = 'mnist-classifier' # TODO: remove this
+CONFIG_ROOT = "configs/train/" # TODO: softcode this
+
+# Retrieve the device to run the models on
+# (use HW acceleration if available, otherwise use CPU)
+DEVICE = get_device()
 
 # Make sure W&B is terminated even if the script crashes
 def cleanup():
     if wandb.run: wandb.finish()
 atexit.register(cleanup)
 
-class CustomJSONEncoder(json.JSONEncoder):
-    def default(self, obj):
-        try:
-            return json.JSONEncoder.default(self, obj)
-        except (TypeError, OverflowError):
-            return None  # Or some other placeh
-
-class CustomDataLoader(DataLoader):
-    def __init__(self, *args, device=None, **kwargs):
-        super().__init__(*args, **kwargs)
-
-        assert device is not None, "Device must be specified"
-        self.device = device
-
-    def __iter__(self):
-        self.iter_data = super().__iter__()
-        self.sample_times = []
-        self.transfer_times = []
-        self.load_times = []
-        self.processing_time = []
-        self.last_end_time = None
-        return self
-
-    def __next__(self):
-        if self.last_end_time is not None:
-            processing_time = time.time() - self.last_end_time
-            self.processing_time.append(processing_time)
-
-        # Measure time to load data
-        start_time = time.time()
-        batch = next(self.iter_data)
-        sample_time = time.time() - start_time
-        self.sample_times.append(sample_time)
-
-        # Measure time to transfer data to GPU
-        start_time = time.time()
-        batch = self._transfer_to_device(batch)
-        transfer_time = time.time() - start_time
-        self.transfer_times.append(transfer_time)
-        
-        load_time = sample_time + transfer_time
-        self.load_times.append(load_time)
-
-        self.last_end_time = time.time()
-
-        return batch
-
-    def _transfer_to_device(self, batch):
-        if isinstance(batch, dict):
-            return {k: v.to(self.device, non_blocking=True) for k, v in batch.items()}
-        elif isinstance(batch, list) or isinstance(batch, tuple):
-            return [self._transfer_to_device(v) for v in batch]
-        else:
-            return batch.to(self.device, non_blocking=True)
-
-    def get_stats(self):
-        load_time = np.sum(self.load_times)
-        batches_per_second = 1.0 / load_time
-        stats = {
-            "sample_time": round(np.sum(self.sample_times), 2),
-            "transfer_time": round(np.sum(self.transfer_times), 2),
-            "load_time": round(load_time, 2),
-            "processing_time": round(np.sum(self.processing_time), 2),
-            "batches_per_second": round(batches_per_second, 4)
-        }
-        return stats
-        
-class BasicPatienceEarlyStopping:
-    """
-    Early stopping detector to stop training when the model stops improving.
-    """
-
-    def __init__(self, patience=5, min_delta=0):
-        self.patience = patience
-        self.min_delta = min_delta
-        self.counter = 0
-        self.best_score = None
-        self.early_stop_triggered = False
-
-    def __call__(self, score):
-        assert self.early_stop_triggered == False, "Early stopping is already triggered"
-        best_score_threshold = self.best_score + self.min_delta if self.best_score is not None else None
-        if self.best_score is None or score >= best_score_threshold: self.best_score, self.counter = score, 0
-        else: self.early_stop_triggered, self.counter = self.counter >= self.patience, self.counter + 1
-        return self.early_stop_triggered, self.best_score, self.counter, self.patience
-
-class OptionalWandbContext:
-
-    def __init__(self, use_wandb, *args, **kwargs):
-        self.use_wandb = use_wandb
-        self.args = args
-        self.kwargs = kwargs
-        self.run = None
-
-    def __enter__(self):
-        if self.use_wandb:
-            self.run = wandb.init(*self.args, **self.kwargs)
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        if self.use_wandb and self.run:
-            self.run.finish()
-
-    def log(self, *args, **kwargs):
-        if self.use_wandb:
-            wandb.log(*args, **kwargs)
-
-    def watch(self, *args, **kwargs):
-        if self.use_wandb:
-            wandb.watch(*args, **kwargs)
-
-    def save(self, *args, **kwargs):
-        if self.use_wandb:
-            wandb.save(*args, **kwargs)
-
-    def Artifact(self, *args, **kwargs):
-        if self.use_wandb:
-            return wandb.Artifact(*args, **kwargs)
-        return None
-
-    def log_artifact(self, *args, **kwargs):
-        if self.use_wandb and self.run:
-            self.run.log_artifact(*args, **kwargs)
-    
-def set_seed(seed):
-    """
-    Set a seed in the random number generators for reproducibility.
-    """
-
-    random.seed(seed) # Set the seed for the random number generator
-    np.random.seed(seed) # Set the seed for NumPy
-    torch.manual_seed(seed) # Set the seed for PyTorch
-    torch.cuda.manual_seed(seed) # Set the seed for CUDA
-    torch.cuda.manual_seed_all(seed) # Set the seed for all CUDA devices
-    torch.backends.cudnn.deterministic = True # Ensure deterministic results (WARNING: can slow down training!)
-    torch.backends.cudnn.benchmark = False # Disable cuDNN benchmarking (WARNING: can slow down training!)
-
+# TODO: should this be called load_train_config?
 def load_config(config_path, extra_config={}):
     """
     Creates the configuration data structure by merging configuration data from multiple sources.
@@ -195,11 +57,10 @@ def load_config(config_path, extra_config={}):
     (eg: model output dir is not part of the config because it doesn't affect the training process).
     """
 
-    config_root = "configs/train/" # TODO: move to constant
-    assert config_path.startswith(config_root), f"config path must start with {config_root}"
+    assert config_path.startswith(CONFIG_ROOT), f"config path must start with {CONFIG_ROOT}"
     assert not config_path.endswith("_default.yml"), "config path must not end with _default.yml"
 
-    config_id = config_path.replace(config_root, "").replace(".yml", "")
+    config_id = config_path.replace(CONFIG_ROOT, "").replace(".yml", "")
     config_id = config_id.replace("/", "__")
 
     def _collect_default_configs(path):
@@ -212,7 +73,7 @@ def load_config(config_path, extra_config={}):
             if os.path.exists(default_config_path):
                 with open(default_config_path, "r", encoding="utf-8") as file:
                     default_configs.append(yaml.safe_load(file))
-            if path.endswith(config_root):
+            if path.endswith(CONFIG_ROOT):
                 break
             path = os.path.dirname(path)
         return default_configs
@@ -245,183 +106,6 @@ def load_config(config_path, extra_config={}):
     config = merger.merge(config, extra_config)
     
     return config
-
-
-def parse_wandb_sweep_config(sweep_config):
-    """
-    Parse the sweep configuration from W&B to a dictionary.
-    Mapping dependent parameters from the flattened structure of the sweep config to the nested structure of our config.
-    """
-
-    config = {}
-    for key, value in sweep_config.items():
-        if key == "method": continue
-
-        if isinstance(value, dict) and "id" in value:
-            _id = value["id"]
-            _id_l = _id.lower()
-            params = {k.replace(f"{_id_l}_", ""): v for k, v in value.items() if k.startswith(_id_l)}
-            value = {"id": _id, "params": params}
-        
-        config[key] = value
-    return config
-
-
-def build_optimizer(model, optimizer_config):
-    """
-    Factory method to build an optimizer based on the specified configuration.
-    """
-
-    optimizer_id = optimizer_config['id']
-    optimizer_params = optimizer_config.get('params', {})
-    optimizer = {
-        "Adam": optim.Adam,
-        "AdamW": optim.AdamW,
-        "SGD": optim.SGD
-    }[optimizer_id](model.parameters(), **optimizer_params)
-    return optimizer
-
-
-def build_lr_scheduler(optimizer, scheduler_config):
-    """
-    Factory method to build a learning rate scheduler based on the specified configuration.
-    """
-
-    if not scheduler_config: return None
-    scheduler_id = scheduler_config['id']
-    scheduler_params = scheduler_config.get('params', {})
-    scheduler = {
-        "StepLR": optim.lr_scheduler.StepLR,
-        "CyclicLR": optim.lr_scheduler.CyclicLR,
-        "ReduceLROnPlateau": optim.lr_scheduler.ReduceLROnPlateau,
-        "CosineAnnealingLR": optim.lr_scheduler.CosineAnnealingLR,
-        "OneCycleLR": optim.lr_scheduler.OneCycleLR
-    }[scheduler_id](optimizer, **scheduler_params)
-    return scheduler
-
-
-def build_loss_function(loss_function_config):
-    """
-    Factory method to build a loss function based on the specified configuration.
-    """
-
-    loss_function_id = loss_function_config['id']
-    loss_function_params = loss_function_config.get('params', {})
-    loss_function = {
-        "CrossEntropyLoss": nn.CrossEntropyLoss
-    }[loss_function_id](**loss_function_params)
-    return loss_function
-
-def build_early_stopping(early_stopping_config):
-    if not early_stopping_config: return None
-    early_stopping_id = early_stopping_config['id']
-    early_stopping_params = early_stopping_config.get('params', {})
-    early_stopping = {
-        "BasicPatienceEarlyStopping": BasicPatienceEarlyStopping
-    }[early_stopping_id](**early_stopping_params)
-    return early_stopping
-
-def _data_loader_worker_init_fn(worker_id):
-    worker_info = torch.utils.data.get_worker_info()
-    base_seed = worker_info.seed
-    worker_seed = (base_seed + worker_id) % 2**32
-    set_seed(worker_seed)
-
-def create_data_loaders(config, dataset_id="mnist", batch_size=64, train_bootstrap_percentage=None, validation_split=None):
-    # Retrieve config params
-    seed = config['seed']
-    data_augmentation_config = config.get('data_augmentation', {})
-    data_augmentation_pipeline_config = data_augmentation_config.get('pipeline', [])
-
-    # Load dataste and calculate its metrics
-    dataset = load_dataset(dataset_id)
-    dataset_metrics = get_dataset_metrics(dataset)
-    logging.info("Dataset metrics:" + json.dumps(dataset_metrics, indent=2))
-
-    # Unpack the dataset into training, validation, and test sets
-    train_dataset = dataset['train']
-    test_dataset = dataset['test']
-    validation_dataset = test_dataset
-
-    # In case a bootstrap percentage was specified then create 
-    # an alternative bootstap dataset (new dataset is created 
-    # through resampling with repetition of original dataset,
-    # useful for creating bagging ensemble models)
-    if train_bootstrap_percentage:
-        train_dataset = create_bootstrap_dataset(train_dataset, train_bootstrap_percentage)
-    
-    # In case a validation split was specified then replace 
-    # the validation set with a subset of the training set
-    if validation_split > 0:
-        train_size = int((1 - validation_split) * len(train_dataset))
-        validation_size = len(train_dataset) - train_size
-        train_dataset, validation_dataset = random_split(train_dataset, [train_size, validation_size])
-
-    # Apply the default transformation to the datasets
-    # (normalize the inputs using the overall mean and standard deviation)
-    dataset_mean = dataset_metrics['mean']
-    dataset_std = dataset_metrics['std']
-    default_transform = transforms.Compose([
-        transforms.Normalize((dataset_mean,), (dataset_std,))
-    ])
-
-    # Build the data augmentation pipeline
-    augment_transform = build_albumentations_pipeline(data_augmentation_pipeline_config, dataset_mean, dataset_std)
-       
-    # Wrap datasets with their respective transform operations
-    # (this will make transformations work regardless of wheter
-    # the dataset is a Dataset or a Subset)
-    train_dataset = DatasetTransformWrapper(train_dataset, transform=augment_transform)
-    validation_dataset = DatasetTransformWrapper(validation_dataset, transform=default_transform)
-    test_dataset = DatasetTransformWrapper(test_dataset, transform=default_transform)
-
-    # Create the data loaders
-    num_workers = NUM_CORES
-    prefetch_factor = 2
-    train_loader = CustomDataLoader(
-        train_dataset, 
-        batch_size=batch_size, 
-        shuffle=True, 
-        num_workers=num_workers,
-        persistent_workers=True,
-        worker_init_fn=_data_loader_worker_init_fn, 
-        generator=torch.Generator().manual_seed(seed), 
-        prefetch_factor=prefetch_factor,
-        pin_memory=True,
-        device=DEVICE
-    )
-    validation_loader = CustomDataLoader(
-        validation_dataset, 
-        batch_size=batch_size, 
-        shuffle=False, 
-        num_workers=num_workers, 
-        persistent_workers=True,
-        worker_init_fn=_data_loader_worker_init_fn, 
-        generator=torch.Generator().manual_seed(seed), 
-        prefetch_factor=prefetch_factor,
-        pin_memory=True,
-        device=DEVICE
-    )
-    test_loader = CustomDataLoader(
-        test_dataset, 
-        batch_size=batch_size, 
-        shuffle=False, 
-        num_workers=num_workers, 
-        persistent_workers=True,
-        worker_init_fn=_data_loader_worker_init_fn, 
-        generator=torch.Generator().manual_seed(seed), 
-        prefetch_factor=prefetch_factor,
-        pin_memory=True,
-        device=DEVICE
-    )
-
-    # Return the data loaders
-    return {
-        'train': train_loader, 
-        'validation': validation_loader, 
-        'test': test_loader
-    }
-
 
 def _train(config, data_loaders, n_epochs, best_model_path, wandb_run=None):
     # Retrieve hyperparameters from the config
@@ -466,7 +150,6 @@ def _train(config, data_loaders, n_epochs, best_model_path, wandb_run=None):
         running_loss = 0.0
         correct = 0
         total = 0
-        save_best_model_meta_path = None
 
         for images, labels in train_loader:
             if use_mixed_precision:
@@ -616,7 +299,8 @@ def train(config, model_output_dir, n_models=1, wandb_enabled=False):
     create_data_loaders_kwargs = {
         **data_loader_config, 
         "dataset_id": data_loader_config.get("dataset", dataset_id),
-        "train_bootstrap_percentage": train_bootstrap_percentage
+        "train_bootstrap_percentage": train_bootstrap_percentage,
+        "device" : DEVICE
     }
     data_loaders = create_data_loaders(config, **create_data_loaders_kwargs)
 
@@ -675,7 +359,8 @@ def evaluate(config, model, loader_type, wandb_enabled=False):
     # Create the data loaders
     create_data_loaders_kwargs = {
         **data_loader_config, 
-        "dataset_id": data_loader_config.get("dataset", dataset_id)
+        "dataset_id": data_loader_config.get("dataset", dataset_id),
+        "device" : DEVICE
     }
     data_loaders = create_data_loaders(config, **create_data_loaders_kwargs)
 
@@ -818,7 +503,7 @@ def sweep(seeds=[42]):
         best_validation_accuracies = []
         for seed in seeds:
             set_seed(seed)
-            data_loaders = create_data_loaders({**config, "seed" : seed}, **data_loader_config)
+            data_loaders = create_data_loaders({**config, "seed" : seed}, device=DEVICE, **data_loader_config)
             best_validation_accuracy, _ = _train(config, data_loaders, n_epochs)
             best_validation_accuracies.append(best_validation_accuracy)
         best_validation_accuracy = np.mean(best_validation_accuracies)
@@ -837,6 +522,7 @@ def main():
     Runs by default when script is not being executed by a W&B sweep agent.
     """
 
+    # TODO: reorder these, re-evaluate which ones are mandatory
     # Parse command line arguments
     parser = argparse.ArgumentParser(description='Train, evaluate, or tune a CNN on MNIST dataset.')
     parser.add_argument('mode', choices=['train', 'eval', 'sweep'], help='Mode to run the script in')
