@@ -27,7 +27,7 @@ import wandb
 import yaml
 import torch.cuda.amp as amp
 from datasets import load_dataset, get_dataset_metrics, build_albumentations_pipeline, DatasetTransformWrapper, create_bootstrap_dataset
-from models import build_model, init_model_weights, load_model
+from models import build_model, load_model
 
 PROJECT_NAME = 'mnist-classifier'
 
@@ -104,6 +104,66 @@ def cleanup():
     if wandb.run: wandb.finish()
 atexit.register(cleanup)
 
+class CustomDataLoader(DataLoader):
+    def __init__(self, *args, device=None, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        assert device is not None, "Device must be specified"
+        self.device = device
+
+    def __iter__(self):
+        self.iter_data = super().__iter__()
+        self.sample_times = []
+        self.transfer_times = []
+        self.load_times = []
+        self.processing_time = []
+        self.last_end_time = None
+        return self
+
+    def __next__(self):
+        if self.last_end_time is not None:
+            processing_time = time.time() - self.last_end_time
+            self.processing_time.append(processing_time)
+
+        # Measure time to load data
+        start_time = time.time()
+        batch = next(self.iter_data)
+        sample_time = time.time() - start_time
+        self.sample_times.append(sample_time)
+
+        # Measure time to transfer data to GPU
+        start_time = time.time()
+        batch = self._transfer_to_device(batch)
+        transfer_time = time.time() - start_time
+        self.transfer_times.append(transfer_time)
+        
+        load_time = sample_time + transfer_time
+        self.load_times.append(load_time)
+
+        self.last_end_time = time.time()
+
+        return batch
+
+    def _transfer_to_device(self, batch):
+        if isinstance(batch, dict):
+            return {k: v.to(self.device, non_blocking=True) for k, v in batch.items()}
+        elif isinstance(batch, list) or isinstance(batch, tuple):
+            return [self._transfer_to_device(v) for v in batch]
+        else:
+            return batch.to(self.device, non_blocking=True)
+
+    def get_stats(self):
+        load_time = np.sum(self.load_times)
+        batches_per_second = 1.0 / load_time
+        stats = {
+            "sample_time": round(np.sum(self.sample_times), 2),
+            "transfer_time": round(np.sum(self.transfer_times), 2),
+            "load_time": round(load_time, 2),
+            "processing_time": round(np.sum(self.processing_time), 2),
+            "batches_per_second": round(batches_per_second, 4)
+        }
+        return stats
+        
 class EarlyStopping:
     """
     Early stopping detector to stop training when the model stops improving.
@@ -322,7 +382,7 @@ def create_data_loaders(config, dataset_name="mnist", batch_size=64, train_boots
     # Create the data loaders
     num_workers = NUM_CORES
     prefetch_factor = 2
-    train_loader = DataLoader(
+    train_loader = CustomDataLoader(
         train_dataset, 
         batch_size=batch_size, 
         shuffle=True, 
@@ -331,9 +391,10 @@ def create_data_loaders(config, dataset_name="mnist", batch_size=64, train_boots
         worker_init_fn=_data_loader_worker_init_fn, 
         generator=torch.Generator().manual_seed(seed), 
         prefetch_factor=prefetch_factor,
-        pin_memory=True
+        pin_memory=True,
+        device=DEVICE
     )
-    validation_loader = DataLoader(
+    validation_loader = CustomDataLoader(
         validation_dataset, 
         batch_size=batch_size, 
         shuffle=False, 
@@ -342,9 +403,10 @@ def create_data_loaders(config, dataset_name="mnist", batch_size=64, train_boots
         worker_init_fn=_data_loader_worker_init_fn, 
         generator=torch.Generator().manual_seed(seed), 
         prefetch_factor=prefetch_factor,
-        pin_memory=True
+        pin_memory=True,
+        device=DEVICE
     )
-    test_loader = DataLoader(
+    test_loader = CustomDataLoader(
         test_dataset, 
         batch_size=batch_size, 
         shuffle=False, 
@@ -353,7 +415,8 @@ def create_data_loaders(config, dataset_name="mnist", batch_size=64, train_boots
         worker_init_fn=_data_loader_worker_init_fn, 
         generator=torch.Generator().manual_seed(seed), 
         prefetch_factor=prefetch_factor,
-        pin_memory=True
+        pin_memory=True,
+        device=DEVICE
     )
 
     # Return the data loaders
@@ -398,6 +461,8 @@ def _train(config, data_loaders, n_epochs, best_model_path, wandb_run=None):
     best_model = None
     best_epoch = None
     for epoch in tqdm(range(1, n_epochs + 1), desc="Training model"):
+        epoch_start = time.time()
+        
         # Set the model in training mode
         model.train()
 
@@ -405,14 +470,7 @@ def _train(config, data_loaders, n_epochs, best_model_path, wandb_run=None):
         correct = 0
         total = 0
 
-        num_batch_loads = 0
-        batch_load_start = time.time()
-        total_batch_load_time = 0
         for images, labels in train_loader:
-            images, labels = images.to(DEVICE, non_blocking=True), labels.to(DEVICE, non_blocking=True)
-            num_batch_loads += 1
-            total_batch_load_time += time.time() - batch_load_start
-
             if use_mixed_precision:
                 with amp.autocast():
                     predictions = model(images)
@@ -439,12 +497,9 @@ def _train(config, data_loaders, n_epochs, best_model_path, wandb_run=None):
             total += labels.size(0)
             correct += (predicted == labels).sum()
 
-            # Reset the batch load timer
-            batch_load_start = time.time()
+        train_loader_metrics = train_loader.get_stats()
+        train_loader_metrics = {f"train/loader/{k}": v for k, v in train_loader_metrics.items()}
         
-        # Calculate average batch load time
-        average_batch_load_time = total_batch_load_time / num_batch_loads
-
         # Calculate metrics on CPU only once per epoch
         train_loss = (running_loss / len(train_loader)).item()
         train_accuracy = (100 * correct / total).item()
@@ -482,19 +537,21 @@ def _train(config, data_loaders, n_epochs, best_model_path, wandb_run=None):
         } if early_stopping else {}
 
         # Create metrics
+        epoch_time = time.time() - epoch_start
         learning_rate = lr_scheduler.get_last_lr()[0] if lr_scheduler else None
         metrics = {
             "train/loss": train_loss,
             "train/accuracy": train_accuracy,
-            "train/batches/total_load_time": total_batch_load_time,
-            "train/batches/average_load_time": average_batch_load_time,
-            "validation/best_accuracy": best_validation_accuracy,
-            "validation/best_epoch": best_epoch,
+            "train/epoch_time": epoch_time,
+            "validation/best_accuracy": best_validation_accuracy, # TODO: redundant?
+            "validation/best_epoch": best_epoch, # TODO: redundant?
+            **train_loader_metrics,
             **validation_metrics,
             **early_stopping_metrics
         }
         if learning_rate: metrics["train/learning_rate"] = learning_rate
-
+        
+        
         # Log metrics to W&B
         if wandb_run: wandb_run.log(metrics, step=epoch)
 
@@ -515,6 +572,7 @@ def _train(config, data_loaders, n_epochs, best_model_path, wandb_run=None):
         if early_stop_triggered:
             logging.info(f"Early stopping triggered at epoch {epoch}")
             break
+        
 
     # Return training results
     return {
@@ -635,14 +693,7 @@ def _evaluate(
     # Evaluate the model
     loader = data_loaders[loader_type]
     with torch.no_grad():  # Disable gradient tracking (no backpropagation needed for evaluation)
-        num_batch_loads = 0
-        batch_load_start = time.time()
-        total_batch_load_time = 0
         for images, labels in loader:
-            images, labels = images.to(DEVICE, non_blocking=True), labels.to(DEVICE, non_blocking=True)
-            num_batch_loads += 1
-            total_batch_load_time += time.time() - batch_load_start
-
             if use_mixed_precision:
                 with amp.autocast():
                     predictions = model(images)
@@ -671,15 +722,12 @@ def _evaluate(
                 if lbl != pred
             ])
 
-            # Reset the batch load timer
-            batch_load_start = time.time()
-
+    loader_metrics = loader.get_stats()
+    loader_metrics = {f"{loader_type}/loader/{k}": v for k, v in loader_metrics.items()}
+    
     # Concatenate all labels and predictions
     all_labels = torch.cat(all_labels).cpu()
     all_predictions = torch.cat(all_predictions).cpu()
-
-    # Calculate average batch load time
-    average_batch_load_time = total_batch_load_time / num_batch_loads
 
     # Calculate metrics:
     # - Accuracy: the percentage of correctly classified samples
@@ -695,8 +743,7 @@ def _evaluate(
 
     # Initialize evaluation metrics to be returned to the caller
     metrics = {
-        f"{loader_type}/batches/total_load_time": total_batch_load_time,
-        f"{loader_type}/batches/average_load_time": average_batch_load_time,
+        **loader_metrics,
         f"{loader_type}/accuracy": accuracy,
         f"{loader_type}/loss": average_loss,
         f"{loader_type}/precision": precision,
@@ -777,10 +824,10 @@ def main():
     parser.add_argument("--n_epochs", type=int, default=200, help='Number of epochs to train the model for')
     parser.add_argument("--n_models", type=int, default=1, help='How many models to train (eg: train an ensemble)')
     parser.add_argument("--train_bootstrap_percentage", type=float, help='Percentage of the dataset size for each bootstrap sample (0 < percentage <= 1)')
-    parser.add_argument("--hyperparams_path", type=str, default="configs/hyperparams/MinimalCNN.yml", help='Path to the hyperparameters file')
+    parser.add_argument("--hyperparams_path", type=str, default="configs/hyperparams/MLP.yml", help='Path to the hyperparameters file')
     parser.add_argument("--model_path", type=str, help='Path to the model file for evaluation')
     parser.add_argument("--model_output_dir", type=str, default="outputs", help='Directory to save the model file')
-    parser.add_argument("--wandb_enabled", type=bool, default=True, help='Whether to enable W&B logging')
+    parser.add_argument("--wandb_enabled", type=bool, default=False, help='Whether to enable W&B logging')
     args = parser.parse_args()
 
     # Set the random seed for reproducibility

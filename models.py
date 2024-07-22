@@ -6,6 +6,24 @@ import wandb
 from glob import glob
 
 
+class MLP(nn.Module):
+    def __init__(self):
+        super(MLP, self).__init__()
+        self.flatten = nn.Flatten()
+        self.fc1 = nn.Linear(28 * 28, 512)
+        self.relu = nn.ReLU()
+        self.fc2 = nn.Linear(512, 256)
+        self.fc3 = nn.Linear(256, 10)
+
+    def forward(self, x):
+        x = self.flatten(x)
+        x = self.fc1(x)
+        x = self.relu(x)
+        x = self.fc2(x)
+        x = self.relu(x)
+        x = self.fc3(x)
+        return x
+
 class LeNet5Original(nn.Module):
     """
     LeNet-5 original model:
@@ -220,7 +238,7 @@ class LeNet5Improved(nn.Module):
 # TODO: check if its easier to train more layers with batch norm (why is the 3 filter score always lower?)
 
 class MinimalCNN(nn.Module):
-    def __init__(self, n_encoder_layers=3, n_decoder_layers=2, out_channels=64):
+    def __init__(self, n_encoder_layers=1, n_decoder_layers=2, out_channels=128):
         super(MinimalCNN, self).__init__()
         self.n_encoder_layers = n_encoder_layers
         self.n_decoder_layers = n_decoder_layers
@@ -379,6 +397,7 @@ def build_model(model_config):
     model_id = model_config['id']
     model_params = model_config.get('params', {})
     model_constructor = {
+        "MLP" : MLP,
         "MinimalCNN": MinimalCNN, # TODO: remove this
         "LeNet5Original": LeNet5Original,
         "LeNet5Improved": LeNet5Improved,
