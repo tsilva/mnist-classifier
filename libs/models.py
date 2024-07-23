@@ -1,27 +1,43 @@
 import os
+import json
 import logging
 import torch
 import torch.nn as nn
 import wandb
 from glob import glob
 
-
 class MLP(nn.Module):
-    def __init__(self):
+    def __init__(self, hidden_layers=[512, 256]):
         super(MLP, self).__init__()
         self.flatten = nn.Flatten()
-        self.fc1 = nn.Linear(28 * 28, 512)
-        self.relu = nn.ReLU()
-        self.fc2 = nn.Linear(512, 256)
-        self.fc3 = nn.Linear(256, 10)
+        
+        # TODO: this is a hack for wandb sweeps, remove it
+        hidden_layers = hidden_layers[:hidden_layers.index(0) if 0 in hidden_layers else len(hidden_layers)]
+
+        input_size = 28 * 28  # Input size is fixed
+        output_size = 10      # Output size is fixed
+        
+        # Create a list to hold all layers
+        layers = []
+        
+        # Input layer
+        layers.append(nn.Linear(input_size, hidden_layers[0]))
+        layers.append(nn.ReLU())
+        
+        # Hidden layers
+        for i in range(1, len(hidden_layers)):
+            layers.append(nn.Linear(hidden_layers[i-1], hidden_layers[i]))
+            layers.append(nn.ReLU())
+        
+        # Output layer
+        layers.append(nn.Linear(hidden_layers[-1], output_size))
+        
+        # Use nn.Sequential to combine all layers
+        self.model = nn.Sequential(*layers)
 
     def forward(self, x):
         x = self.flatten(x)
-        x = self.fc1(x)
-        x = self.relu(x)
-        x = self.fc2(x)
-        x = self.relu(x)
-        x = self.fc3(x)
+        x = self.model(x)
         return x
 
 class LeNet5Original(nn.Module):
@@ -387,23 +403,25 @@ class AdvancedCNN(nn.Module):
 
         # Return output with shape (batch_size, 10)
         return x
-        
 
-def build_model(model_config):
+MODELS = {_class.__name__: _class for _class in [
+    MLP,
+    MinimalCNN,
+    LeNet5Original,
+    LeNet5Improved,
+    AdvancedCNN
+]}
+
+
+def build_model(config):
     """
     Factory method to build a model based on the specified configuration.
     """
 
-    model_id = model_config['id']
-    model_params = model_config.get('params', {})
-    model_constructor = {
-        "MLP" : MLP,
-        "MinimalCNN": MinimalCNN, # TODO: remove this
-        "LeNet5Original": LeNet5Original,
-        "LeNet5Improved": LeNet5Improved,
-        "AdvancedCNN": AdvancedCNN
-    }[model_id]
-    model = model_constructor(**model_params)
+    _id = config['id']
+    _kwargs = {k: v for k, v in config.items() if k not in ["id"]}
+    constructor = MODELS[_id]
+    model = constructor(**_kwargs)
     return model
 
 
@@ -441,6 +459,12 @@ def load_model(model_path, device):
         logging.info(f"Downloading model artifact: {artifact_path}")
         model_path = f"{wandb.use_artifact(artifact_path, type='model').download()}/best_model_{run_id}.jit"
 
-    model_files = [model_path] if not os.path.isdir(model_path) else glob(os.path.join(model_path, "*.jit"))
-    models = [_load_model(model_file) for model_file in model_files]
-    return models[0] if len(models) == 1 else EnsembleModel(models).to(device)
+    model_paths = [model_path] if not os.path.isdir(model_path) else glob(os.path.join(model_path, "*.jit"))
+    models = [_load_model(model_file) for model_file in model_paths]
+    model = models[0] if len(models) == 1 else EnsembleModel(models).to(device)
+
+    model_meta_paths = [model_path.replace(".jit", ".json") for model_path in model_paths]
+    model_metas = [json.load(open(meta_path)) for meta_path in model_meta_paths]
+    model_meta = model_metas[0]
+
+    return model, model_meta

@@ -7,7 +7,7 @@ import numpy as np
 import torchvision.transforms as transforms
 from torch.utils.data import DataLoader, random_split
 
-from libs.misc import set_seed
+from libs.misc import get_global_seed, set_global_seed
 from libs.datasets import load_dataset, get_dataset_metrics, build_albumentations_pipeline, DatasetTransformWrapper, create_bootstrap_dataset
 
 class CustomDataLoader(DataLoader):
@@ -74,16 +74,17 @@ def _data_loader_worker_init_fn(worker_id):
     worker_info = torch.utils.data.get_worker_info()
     base_seed = worker_info.seed
     worker_seed = (base_seed + worker_id) % 2**32
-    set_seed(worker_seed)
+    set_global_seed(worker_seed)
 
-# TODO: dataset_id should be mandatory
-def create_data_loaders(config, dataset_id="mnist", batch_size=64, train_bootstrap_percentage=None, validation_split=None, device=None):
-    # Retrieve config params
-    seed = config['seed']
-    data_augmentation_config = config.get('data_augmentation', {})
-    data_augmentation_pipeline_config = data_augmentation_config.get('pipeline', [])
-
-    # Load dataste and calculate its metrics
+def create_data_loaders(
+    dataset_id, 
+    device, 
+    batch_size=64, 
+    train_augmentation=None, 
+    train_bootstrap_percentage=None, 
+    validation_split=0
+):
+    # Load dataset and calculate its metrics
     dataset = load_dataset(dataset_id)
     dataset_metrics = get_dataset_metrics(dataset)
     logging.info("Dataset metrics:" + json.dumps(dataset_metrics, indent=2))
@@ -116,7 +117,7 @@ def create_data_loaders(config, dataset_id="mnist", batch_size=64, train_bootstr
     ])
 
     # Build the data augmentation pipeline
-    augment_transform = build_albumentations_pipeline(data_augmentation_pipeline_config, dataset_mean, dataset_std)
+    augment_transform = build_albumentations_pipeline(train_augmentation, dataset_mean, dataset_std) if train_augmentation else default_transform
        
     # Wrap datasets with their respective transform operations
     # (this will make transformations work regardless of wheter
@@ -126,6 +127,7 @@ def create_data_loaders(config, dataset_id="mnist", batch_size=64, train_bootstr
     test_dataset = DatasetTransformWrapper(test_dataset, transform=default_transform)
 
     # Create the data loaders
+    seed = get_global_seed()
     num_workers = multiprocessing.cpu_count()
     prefetch_factor = 2
     train_loader = CustomDataLoader(
@@ -135,7 +137,7 @@ def create_data_loaders(config, dataset_id="mnist", batch_size=64, train_bootstr
         num_workers=num_workers,
         persistent_workers=True,
         worker_init_fn=_data_loader_worker_init_fn, 
-        generator=torch.Generator().manual_seed(seed), 
+        generator=torch.Generator().manual_seed(seed),
         prefetch_factor=prefetch_factor,
         pin_memory=True,
         device=device

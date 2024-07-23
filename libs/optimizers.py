@@ -1,16 +1,18 @@
 import torch.optim as optim
 
-def build_optimizer(model, optimizer_config):
+OPTIMIZERS = {_class.__name__: _class for _class in [
+    optim.Adam,
+    optim.AdamW,
+    optim.SGD
+]}
+
+def build_optimizer(model, config):
     """
     Factory method to build an optimizer based on the specified configuration.
     """
 
-    optimizer_id = optimizer_config['id']
-    optimizer_params = optimizer_config.get('params', {})
-    optimizer = {
-        "Adam": optim.Adam,
-        "AdamW": optim.AdamW,
-        "SGD": optim.SGD
-    }[optimizer_id](model.parameters(), **optimizer_params)
-    return optimizer
-
+    _id = config['id']
+    _kwargs = {k: v for k, v in config.items() if k not in ["id"]}
+    constructor = OPTIMIZERS[_id]
+    loss_function = constructor(model.parameters(), **_kwargs)
+    return loss_function

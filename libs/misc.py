@@ -4,17 +4,25 @@ import random
 import numpy as np
 import torch
 import logging
+from deepmerge import Merger
 
 class CustomJSONEncoder(json.JSONEncoder):
     def default(self, obj):
         try: return json.JSONEncoder.default(self, obj)
         except (TypeError, OverflowError): return None
 
-def set_seed(seed):
+__seed = None
+def get_global_seed():
+    return __seed
+
+def set_global_seed(seed):
     """
     Set a seed in the random number generators for reproducibility.
     """
 
+    global __seed
+    __seed = seed
+    
     random.seed(seed) # Set the seed for the random number generator
     np.random.seed(seed) # Set the seed for NumPy
     torch.manual_seed(seed) # Set the seed for PyTorch
@@ -35,3 +43,14 @@ def get_device():
         input()
 
     return device
+
+# Define the merger object with custom strategies using a lambda function
+config_merger = Merger(
+    [
+        (list, lambda config, path, base, nxt: nxt), 
+        (dict, "merge") # Merge dictionaries
+    ],  
+    # List merge strategy using a lambda
+    ["override"], # Default strategies for other types
+    ["override"]  # Default conflict resolution strategy
+)

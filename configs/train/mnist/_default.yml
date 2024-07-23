@@ -5,15 +5,40 @@ logging:
   interval: 1
 dataset:
   id: mnist
-  train:
-    bootstrap_percentage: 0
-model:
-  id: MLP
-lr_scheduler:
-  id: ReduceLROnPlateau
+  validation_split: 0
+  train_bootstrap_percentage: 0
 data_loader:
   batch_size: 64
-  validation_split: 0.0
+  train_augmentation:
+    - name: Rotate
+      params:
+        limit: 30
+    - name: RandomResizedCrop
+      params:
+        height: 28
+        width: 28
+        scale: [0.8, 1.0]
+    - name: GridDistortion
+      params:
+        num_steps: 5
+        distort_limit: 0.3
+        p: 0.5
+    - name: CoarseDropout
+      params:
+        max_holes: 1
+        max_height: 10
+        max_width: 10
+        p: 0.5
+lr_scheduler:
+  id: ReduceLROnPlateau
+loss_function:
+  id: CrossEntropyLoss
+early_stopping:
+  id: BasicPatienceEarlyStopping
+  metric: validation/loss
+  goal: minimize
+  patience: 20
+  min_delta: 0.0001
 optimizer:
   id: Adam
 loss_function:

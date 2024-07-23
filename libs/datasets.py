@@ -136,8 +136,8 @@ DATASETS = {
 def get_dataset_names():
     return list(DATASETS.keys())
 
-def load_dataset(dataset_name, dataset_root='./data'):
-    dataset_class = DATASETS[dataset_name]
+def load_dataset(dataset_id, dataset_root='./data'):
+    dataset_class = DATASETS[dataset_id]
     train_dataset = dataset_class(root=dataset_root, train=True, download=True, transform=transforms.ToTensor())
     test_dataset = dataset_class(root=dataset_root, train=False, download=True, transform=transforms.ToTensor())
     
@@ -229,9 +229,9 @@ class AlbumentationsToTorchvisionWrapper:
         transformed_image = transformed['image']
         return transformed_image
     
-def build_albumentations_pipeline(pipeline_config, mean, std):
+def build_albumentations_pipeline(pipeline, mean, std):
     a_pipeline = []
-    for transform in pipeline_config:
+    for transform in pipeline:
         name = transform['name']
         params = transform['params']
         a_pipeline.append(getattr(A, name)(**params))

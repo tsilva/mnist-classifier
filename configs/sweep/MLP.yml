@@ -1,0 +1,24 @@
+program: main.py
+method: random
+metric:
+  goal: maximize
+  name: score
+parameters:
+  sweep:
+    value: 1
+  seed:
+    values: [42, 84, 252]
+  config:
+    value: mnist/MLP.yml
+  n_epochs:
+    value: 5
+  model:
+    parameters:
+      list__hidden_layers__1:
+        values: [512, 256, 128]
+      list__hidden_layers__2:
+        values: [256, 128, 64]
+      list__hidden_layers__3:
+        values: [128, 64, 32]
+      list__hidden_layers__4:
+        values: [64, 32, 16]

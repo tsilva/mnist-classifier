@@ -1,28 +1,2 @@
 model:
   id: LeNet5Original
-lr_scheduler:
-  id: ReduceLROnPlateau
-data_augmentation:
-  pipeline:
-    - name: Rotate
-      params:
-        limit: 45
-    - name: RandomResizedCrop
-      params:
-        height: 28
-        width: 28
-        scale: [0.7, 1.0]
-    - name: HorizontalFlip
-      params:
-        p: 0.5
-    - name: GridDistortion
-      params:
-        num_steps: 4
-        distort_limit: 0.4
-        p: 0.7
-    - name: CoarseDropout
-      params:
-        max_holes: 2
-        max_height: 8
-        max_width: 8
-        p: 0.6
