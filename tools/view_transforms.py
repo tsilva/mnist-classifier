@@ -7,7 +7,7 @@ if not "NUMEXPR_MAX_THREADS" in os.environ: os.environ["NUMEXPR_MAX_THREADS"] = 
 
 import argparse
 from matplotlib import pyplot as plt
-from datasets import load_dataset, get_dataset_metrics, get_dataset_names, DatasetTransformWrapper, build_albumentations_pipeline
+from libs.datasets import load_dataset, get_dataset_metrics, get_dataset_names, DatasetTransformWrapper, build_albumentations_pipeline
 
 # Define the default configuration for the model
 PIPELINE_CONFIG = [

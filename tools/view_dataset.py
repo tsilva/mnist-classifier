@@ -6,7 +6,8 @@ import numpy as np
 import random
 import matplotlib.animation as animation
 import argparse
-from datasets import load_dataset, get_dataset_metrics, get_dataset_names
+
+from libs.datasets import load_dataset, get_dataset_metrics, get_dataset_names
 
 def load_and_prepare_dataset(dataset_name, num_samples):
     # Load the dataset

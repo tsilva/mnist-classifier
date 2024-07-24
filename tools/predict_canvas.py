@@ -4,8 +4,9 @@ import torch
 import torchvision.transforms as transforms
 from PIL import Image, ImageDraw
 import tkinter as tk
-from models import load_model
-from datasets import load_dataset, get_dataset_names, get_dataset_metrics
+
+from libs.models import load_model
+from libs.datasets import load_dataset, get_dataset_names, get_dataset_metrics
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -91,19 +92,16 @@ class ImageRecognitionGUI:
         self.root.mainloop()
 
 def main(args):
-    # Load dataste and calculate its metrics
-    dataset = load_dataset(args.dataset)
-
-
     # Load the models
-    model = load_model(args.model_path, DEVICE)
+    model, model_meta = load_model(args.model_path, DEVICE)
+    dataset_id = model_meta["config"]["dataset"]["id"]
 
     # Set model in eval mode (disables dropout and batch 
     # normalization, which would affect the prediction)
     model.eval()
 
     # Load the dataset
-    dataset = load_dataset(args.dataset)
+    dataset = load_dataset(dataset_id)
     dataset_class = dataset["dataset_class"]
     dataset_metrics = get_dataset_metrics(dataset)
 
@@ -115,7 +113,6 @@ if __name__ == "__main__":
     dataset_names = get_dataset_names()
     parser = argparse.ArgumentParser(description="Image Recognition GUI")
     parser.add_argument("model_path", type=str, help="Path to the model or directory containing model files")
-    parser.add_argument("--dataset", type=str, choices=dataset_names, default='mnist', help="Dataset to use")
     args = parser.parse_args()
     
     # Run the main function
