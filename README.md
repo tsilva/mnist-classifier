@@ -1,146 +1,141 @@
-# MNIST-like Classifier
+<div align="center">
+  <img src="logo.png" alt="mnist-classifier" width="512"/>
 
-This project implements a Convolutional Neural Network (CNN) classifier for MNIST-like datasets using PyTorch. It includes features for training, evaluation, and hyperparameter tuning using Weights & Biases (wandb) for experiment tracking.
+  [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+  [![Python](https://img.shields.io/badge/Python-3.8+-3776ab.svg)](https://python.org)
+  [![PyTorch](https://img.shields.io/badge/PyTorch-2.0+-ee4c2c.svg)](https://pytorch.org)
+  [![W&B](https://img.shields.io/badge/Weights_&_Biases-Enabled-ffcc33.svg)](https://wandb.ai)
 
-## Table of Contents
+  **🧠 Train and evaluate CNN classifiers on MNIST-like datasets with experiment tracking, hyperparameter sweeps, and beautiful visualizations**
 
-- [Features](#features)
-- [Datasets](#datasets)
-- [Installation](#installation)
-- [Usage](#usage)
-- [Models](#models)
-- [Benchmarks](#benchmarks)
-- [Configuration](#configuration)
-- [Logging and Visualization](#logging-and-visualization)
-- [License](#license)
+  [Features](#features) · [Quick Start](#quick-start) · [Models](#models) · [Benchmarks](#benchmarks)
+</div>
 
 ## Features
 
-- Implementation of multiple CNN architectures (LeNet5, SimpleCNN, AdvancedCNN)
-- Support for various MNIST-like datasets (MNIST, FashionMNIST, EMNIST, KMNIST, QMNIST)
-- Training with customizable hyperparameters
-- Evaluation on test set
-- Hyperparameter tuning using wandb sweeps
-- Logging of training progress, metrics, and artifacts to wandb
-- Visualization of confusion matrices and misclassified images
-- Support for custom weight initialization
-- Learning rate scheduling
+- **Multiple CNN Architectures** - LeNet5, LeNet5Improved, and AdvancedCNN with up to 99.59% accuracy
+- **Five MNIST-like Datasets** - MNIST, FashionMNIST, EMNIST, KMNIST, and QMNIST
+- **Experiment Tracking** - Full Weights & Biases integration for metrics, artifacts, and visualizations
+- **Hyperparameter Sweeps** - Automated tuning with wandb sweeps
+- **Training Utilities** - Learning rate scheduling, early stopping, custom weight initialization
+- **Rich Visualizations** - Confusion matrices and misclassified image analysis
 
-## Datasets
+## Quick Start
 
-The project supports the following datasets:
+```bash
+# Clone the repository
+git clone https://github.com/tsilva/mnist-classifier.git
+cd mnist-classifier
 
-- **MNIST**: Handwritten digit recognition dataset
-- **FashionMNIST**: Fashion product recognition dataset
-- **EMNIST**: Extended MNIST dataset with letters and digits
-- **KMNIST**: Kuzushiji-MNIST dataset (Japanese characters)
-- **QMNIST**: QMNIST dataset (MNIST alternative with better quality)
+# Create and activate conda environment
+conda env create -f environment.yml
+conda activate mnist-classifier
 
-To use a specific dataset, specify it in the configuration file or as a command-line argument.
+# Train a model
+python main.py train --hyperparams_path configs/train/LeNet5.yml --n_epochs 50 --dataset MNIST
+```
+
+## Requirements
+
+| Requirement | Specification |
+|-------------|---------------|
+| **Python** | 3.8+ |
+| **GPU** | NVIDIA with CUDA support (optional but recommended) |
+| **CUDA** | 11.8+ (if using GPU) |
+| **RAM** | 8GB+ recommended |
 
 ## Installation
 
-1. Clone this repository:
+1. **Install Miniconda** from the [official website](https://docs.conda.io/en/latest/miniconda.html)
 
-```
-git clone https://github.com/tsilva/mnist-classifier.git
-cd mnist-classifier
-```
+2. **Create the environment:**
+   ```bash
+   conda env create -f environment.yml
+   conda activate mnist-classifier
+   ```
 
-2. Install Miniconda:
-   - Visit the [Miniconda website](https://docs.conda.io/en/latest/miniconda.html) and download the appropriate installer for your operating system.
-   - Follow the installation instructions for your platform.
+3. **Verify CUDA availability** (optional):
+   ```bash
+   python -c "import torch; print(f'CUDA available: {torch.cuda.is_available()}')"
+   ```
 
-3. Create a new Conda environment:
-
-```
-conda env create -f environment.yml
-```
-
-3. Activate the new environment:
-
-```
-conda activate mnist-classifier
-```
-
-4. Ensure that CUDA is available:
-
-```
-python -c "import torch; print(torch.cuda.is_available()); print(torch.cuda.current_device()); print(torch.cuda.get_device_name(0))"
-```
-
-If not available try the following (for CUDA 11.8):
-
-```
-conda activate mnist-classifier
-pip uninstall torch torchvision
-pip install torch torchvision torchaudio --extra-index-url https://download.pytorch.org/whl/cu118
-```
+   If CUDA is not detected:
+   ```bash
+   pip uninstall torch torchvision
+   pip install torch torchvision torchaudio --extra-index-url https://download.pytorch.org/whl/cu118
+   ```
 
 ## Usage
 
-The script can be run in three modes: train, eval, and sweep.
-
 ### Training
 
-To train a model:
-
-```
-python main.py train --hyperparams_path configs/hyperparams/LeNet5.yml --n_epochs 50 --dataset MNIST
+```bash
+python main.py train --hyperparams_path configs/train/LeNet5.yml --n_epochs 50 --dataset MNIST
 ```
 
 ### Evaluation
 
-To evaluate a trained model:
-
-```
+```bash
+# Local model
 python main.py eval --model_path outputs/best_model.pth --dataset FashionMNIST
-```
 
-Or reference the URL of the Weights & Biases run:
-
-```
+# From W&B run
 python main.py eval --model_path https://wandb.ai/username/project/runs/run_id --dataset EMNIST-letters
 ```
 
-### Hyperparameter Tuning
+### Hyperparameter Sweeps
 
-To create hyperparameter sweep:
-
-```
+```bash
+# Create sweep
 python main.py sweep --dataset KMNIST
-```
 
-Then start the sweep agent:
-
-```
+# Start agent
 wandb agent username/project/sweep_id
 ```
 
+## Datasets
+
+| Dataset | Description | Classes |
+|---------|-------------|---------|
+| **MNIST** | Handwritten digits | 10 |
+| **FashionMNIST** | Fashion product images | 10 |
+| **EMNIST** | Extended MNIST with letters and digits | 47+ |
+| **KMNIST** | Kuzushiji (Japanese characters) | 10 |
+| **QMNIST** | Higher quality MNIST alternative | 10 |
+
 ## Models
 
-The project includes three CNN architectures:
+### LeNet5Original
 
-1. **LeNet5**: Attempts to replicate the original LeNet-5 architecture with 2 convolutional layers and 3 fully connected layers.
-2. **LeNet5Improved**: An improved version of LeNet-5 with 3 convolutional layers, 2 fully connected layers, batch normalization, dropout, max pooling, and ReLU.
-3. **AdvancedCNN**: A more advanced CNN architecture with 7 convolutional layers (more features), with different kernel sizes and strides (different feature scales), 1 fully connected layer (less classification overfitting), batch normalization, dropout, and ReLU.
+Classic architecture from the original 1998 paper:
+- 2 convolutional layers + 3 fully connected layers
+- Average pooling, Tanh activation
+
+### LeNet5Improved
+
+Modernized LeNet with better performance:
+- 3 convolutional layers + 2 fully connected layers
+- Batch normalization, dropout, max pooling, ReLU
+
+### AdvancedCNN
+
+Deep architecture for maximum accuracy:
+- 7 convolutional layers with varying kernel sizes
+- 1 fully connected layer (reduced overfitting)
+- Batch normalization, dropout, ReLU
 
 ## Benchmarks
 
-The following table shows the test set accuracy achieved for each model on each dataset:
-
-| Model                              | MNIST   | FashionMNIST | QMNIST | KMNIST | EMNIST-digits |
-|------------------------------------|---------|--------------| ------ | ------ | ------------- |
-| LeNet5                             | 97.05%  | N/A          | N/A    | N/A    | N/A           |
-| LeNet5Improved                     | 99.55%  | N/A          | N/A    | N/A    | N/A           |
-| Advanced CNN                       | 99.58%  | N/A          | N/A    | N/A    | N/A           |
-| Weighted Averaging Ensemble        | 99.59%  | N/A          | N/A    | N/A    | N/A           |
+| Model | MNIST | FashionMNIST | QMNIST | KMNIST | EMNIST-digits |
+|-------|-------|--------------|--------|--------|---------------|
+| LeNet5 | 97.05% | - | - | - | - |
+| LeNet5Improved | 99.55% | - | - | - | - |
+| AdvancedCNN | 99.58% | - | - | - | - |
+| **Ensemble** | **99.59%** | - | - | - | - |
 
 ## Configuration
 
-Hyperparameters and model configurations are specified in YAML files in the `configs/hyperparams/` directory. You can create custom configuration files to experiment with different settings.
-
-Example configuration (LeNet5.yml):
+Hyperparameters are specified in YAML files under `configs/train/`:
 
 ```yaml
 data_loader:
@@ -172,18 +167,40 @@ lr_scheduler:
     gamma: 0.1
 ```
 
-## Logging and Visualization
+## Experiment Tracking
 
-The project uses Weights & Biases (wandb) for experiment tracking and visualization. During training and evaluation, the following metrics and artifacts are logged:
+All experiments are logged to [Weights & Biases](https://wandb.ai):
 
-- Training and validation loss
-- Training and validation accuracy
+- Training/validation loss and accuracy
 - Precision, recall, and F1 score
-- Confusion matrix
+- Confusion matrices
 - Misclassified images
-- Best model weights
+- Best model checkpoints
 
-You can view the results and compare experiments in the wandb dashboard.
+## Project Structure
+
+```
+mnist-classifier/
+├── main.py              # CLI entry point (train/eval/sweep)
+├── configs/
+│   ├── train/           # Training hyperparameters
+│   └── sweep/           # Sweep configurations
+├── libs/
+│   ├── models.py        # CNN architectures
+│   ├── datasets.py      # Dataset loaders
+│   ├── data_loaders.py  # DataLoader utilities
+│   ├── optimizers.py    # Optimizer builders
+│   ├── lr_schedulers.py # LR scheduler builders
+│   ├── loss_functions.py
+│   ├── early_stopping.py
+│   └── wandb_utils.py   # W&B integration
+├── tools/               # Utility scripts
+└── outputs/             # Saved models and artifacts
+```
+
+## Contributing
+
+Contributions are welcome! Please feel free to submit a Pull Request.
 
 ## License
 
