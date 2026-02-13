@@ -1,0 +1,10 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "mnist-classifier"
+version = "0.1.0"
+description = "**🧠 Train and evaluate CNN classifiers on MNIST-like datasets with experiment tracking, hyperparameter sweeps, and beautiful visualizations**"
+requires-python = ">=3.10"
+dependencies = []

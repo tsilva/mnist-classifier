@@ -6,7 +6,7 @@
   [![PyTorch](https://img.shields.io/badge/PyTorch-2.0+-ee4c2c.svg)](https://pytorch.org)
   [![W&B](https://img.shields.io/badge/Weights_&_Biases-Enabled-ffcc33.svg)](https://wandb.ai)
 
-  **🧠 Train and evaluate CNN classifiers on MNIST-like datasets with experiment tracking, hyperparameter sweeps, and beautiful visualizations**
+  **🧠 Train and evaluate CNN classifiers on MNIST-like datasets with experiment tracking, hyperparameter sweeps, and beautiful visualizations 📊**
 
   [Features](#features) · [Quick Start](#quick-start) · [Models](#models) · [Benchmarks](#benchmarks)
 </div>
