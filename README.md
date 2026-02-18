@@ -1,3 +1,7 @@
+> [!WARNING]
+> ## Archived
+> This project is archived and no longer maintained. It has been superseded by newer ML experiment repositories.
+
 <div align="center">
   <img src="logo.png" alt="mnist-classifier" width="512"/>
 
@@ -197,10 +201,6 @@ mnist-classifier/
 ├── tools/               # Utility scripts
 └── outputs/             # Saved models and artifacts
 ```
-
-## Contributing
-
-Contributions are welcome! Please feel free to submit a Pull Request.
 
 ## License
 
