@@ -1,19 +1,21 @@
-> [!WARNING]
-> ## Archived
-> This project is archived and no longer maintained. It has been superseded by newer ML experiment repositories.
-
-<div align="center">
+<p align="center">
   <img src="logo.png" alt="mnist-classifier" width="512"/>
+  <br />
+  <!-- repo-tagline:start -->
+  <strong>🧠 Train MNIST classifiers with experiment tracking and hyperparameter sweeps 📊</strong>
+  <!-- repo-tagline:end -->
+</p>
 
-  [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
   [![Python](https://img.shields.io/badge/Python-3.8+-3776ab.svg)](https://python.org)
   [![PyTorch](https://img.shields.io/badge/PyTorch-2.0+-ee4c2c.svg)](https://pytorch.org)
   [![W&B](https://img.shields.io/badge/Weights_&_Biases-Enabled-ffcc33.svg)](https://wandb.ai)
 
-  **🧠 Train and evaluate CNN classifiers on MNIST-like datasets with experiment tracking, hyperparameter sweeps, and beautiful visualizations 📊**
-
   [Features](#features) · [Quick Start](#quick-start) · [Models](#models) · [Benchmarks](#benchmarks)
-</div>
+
+> [!WARNING]
+> ## Archived
+> This project is archived and no longer maintained. It has been superseded by newer ML experiment repositories.
 
 ## Features
 
